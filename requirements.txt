@@ -1,0 +1,39 @@
+# requirements.txt
+# Python package dependencies for the EDI Claims Processor project
+# --- Core Libraries ---
+python-dotenv         # For managing environment variables (especially for secrets not in config.yaml)
+PyYAML                # For reading and parsing config.yaml
+
+# --- Database Interaction ---
+SQLAlchemy>=1.4,<2.0    # Core ORM Toolkit. Specify version range for stability.
+psycopg2-binary         # PostgreSQL database adapter
+pyodbc                # ODBC database adapter (for SQL Server)
+
+# --- Rules Engine ---
+pyDatalog             # For implementing the rules engine using Datalog logic
+
+alembic # For database migrations (optional, but highly recommended for production)
+# --- Web API (FastAPI) ---
+fastapi               # Modern, fast web framework for building APIs
+uvicorn[standard]     # ASGI server to run FastAPI (includes websockets, http-tools, etc.)
+
+# pydantic is a dependency of FastAPI, usually installed with it. Explicitly listing can be good.
+pydantic>=1.8,<2.0     # Data validation and settings management using Python type hints
+
+# --- Data Handling & Machine Learning ---
+pandas                # Powerful data analysis and manipulation library (for RVU data, ML features)
+numpy                 # Fundamental package for scientific computing (often a pandas/scikit-learn dependency)
+scikit-learn          # Machine learning library (for the example classifier, preprocessing, metrics)
+joblib                # For saving and loading Python objects (e.g., scikit-learn models)
+
+# --- Asynchronous Operations & HTTP Clients ---
+asyncio # is part of the standard library
+httpx                 # A fully featured HTTP client for Python 3, with sync and async capabilities (e.g., for external service calls)
+
+# --- Development & Testing (Optional - can be in a separate dev-requirements.txt) ---
+pytest
+pytest-asyncio # For testing asyncio code with pytest
+coverage # For code coverage measurement
+black # Uncompromising Python code formatter
+flake8 # Linter for style guide enforcement
+mypy # Optional static type checker
