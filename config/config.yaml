@@ -1,0 +1,97 @@
+# config/config.yaml
+# Application Configuration for EDI Claims Processor
+
+# Database Configurations
+# -----------------------
+# PostgreSQL connection (Staging & Metrics Database)
+# Ensure the user has necessary permissions on edi_staging database and edi, staging schemas.
+postgres_staging:
+  host: "localhost"
+  port: 5432
+  database: "edi_staging" # As per postgresql_create_edi_databases.sql
+  user: "your_postgres_user"
+  password: "your_postgres_password"
+  pool_size: 10 # Min connections for connection pool warming
+  max_overflow: 20 # Max connections beyond pool_size
+
+# SQL Server connection (Production Database)
+# Ensure the user has necessary permissions on edi_production database and dbo schema.
+sql_server_production:
+  driver: "{ODBC Driver 17 for SQL Server}" # Or your installed ODBC driver
+  server: "your_sql_server_instance" # e.g., localhost\SQLEXPRESS or your_server_name
+  database: "edi_production" # As per sqlserver_create_results_database.sql
+  user: "your_sql_server_user" # Optional: if using SQL Server Authentication
+  password: "your_sql_server_password" # Optional: if using SQL Server Authentication
+  trusted_connection: "yes" # Use 'no' if using SQL Server Authentication with user/password
+  pool_size: 10 # Min connections for connection pool warming
+  max_overflow: 20 # Max connections beyond pool_size
+
+# Processing Parameters
+# ---------------------
+processing:
+  batch_size: 1000 # Number of claims to process in a single batch
+  # Target throughput: ~6,667 records/second (100,000 records in 15 seconds)
+  # This batch_size will be used by batch_handler.py
+  reimbursement_conversion_factor: 36.04 # As per Claims Processing Overview.md
+  max_retries_edi_parsing: 3 # For edi_parser.py retry queue
+
+# Machine Learning Model
+# ----------------------
+ml_model:
+  path: "ml_model/model.pkl"
+  # Add any other model-specific configurations here, e.g., feature names if not embedded
+  filter_prediction_threshold: 0.7 # Example threshold for ML filter prediction
+
+# File Paths
+# ----------
+file_paths:
+  rvu_data_csv: "data/rvu_data/rvu_table.csv"
+  sample_edi_claims_dir: "data/sample_edi_claims/"
+  log_dir: "logs/"
+
+# Logging Configuration
+# ---------------------
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  app_log_file: "logs/app.log"
+  audit_log_file: "logs/audit.log"
+  log_format: "%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s"
+  max_bytes: 10485760 # 10MB
+  backup_count: 5
+
+# API Configuration (for Failed Claims UI & external systems)
+# ---------------------------------------------------------
+api:
+  host: "0.0.0.0"
+  port: 8000
+  # Potentially add JWT secret keys or other API security settings here
+
+# Caching
+# -------
+caching:
+  rvu_cache_type: "memory_mapped" # or "in_memory"
+
+# Security
+# --------
+security:
+  # Configurations for PII/PHI protection, e.g., encryption keys (better stored in a vault)
+  # For now, this section is a placeholder.
+  pii_phi_encryption_key_placeholder: "your_strong_encryption_key_here_ ideally_from_vault"
+  hashing_salt_placeholder: "your_default_hashing_salt_change_me" 
+
+# Services
+# --------
+services:
+  claim_repair:
+    enabled: true # Set to false to disable the claim repair suggestion feature
+    # AI model endpoint for claim repair suggestions if applicable
+    # repair_suggestion_api_url: "http://localhost:8081/suggest_repair"
+
+# Performance
+# -----------
+performance:
+  # Settings for read replicas, if applicable.
+  enable_read_write_splitting: false # Set to true to activate logic in connection_manager
+  postgres_read_replica_host: "localhost-pg-replica" # Example, if used
+  sql_server_read_replica_server: "your_sql_server_replica_instance" # Example, if used
+
