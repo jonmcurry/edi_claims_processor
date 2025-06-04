@@ -9,8 +9,8 @@ postgres_staging:
   host: "localhost"
   port: 5432
   database: "edi_staging" # As per postgresql_create_edi_databases.sql
-  user: "your_postgres_user"
-  password: "your_postgres_password"
+  user: "postgres"
+  password: "admin"
   pool_size: 10 # Min connections for connection pool warming
   max_overflow: 20 # Max connections beyond pool_size
 
@@ -20,8 +20,8 @@ sql_server_production:
   driver: "{ODBC Driver 17 for SQL Server}" # Or your installed ODBC driver
   server: "your_sql_server_instance" # e.g., localhost\SQLEXPRESS or your_server_name
   database: "edi_production" # As per sqlserver_create_results_database.sql
-  user: "your_sql_server_user" # Optional: if using SQL Server Authentication
-  password: "your_sql_server_password" # Optional: if using SQL Server Authentication
+  user: "sa" # Optional: if using SQL Server Authentication
+  password: "ClearToFly1" # Optional: if using SQL Server Authentication
   trusted_connection: "yes" # Use 'no' if using SQL Server Authentication with user/password
   pool_size: 10 # Min connections for connection pool warming
   max_overflow: 20 # Max connections beyond pool_size
