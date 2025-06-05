@@ -54,7 +54,7 @@ class ReimbursementCalculator:
             return Decimal("0.0")
 
 
-    def calculate_line_item_reimbursement(self, cpt_code: str, units: int, line_charge: Decimal) -> Tuple[Decimal, str]:
+    def calculate_line_item_reimbursement(self, cpt_code: str, units: int, line_charge: Decimal) -> tuple[Decimal, str]:
         """
         Calculates the estimated reimbursement for a single claim line item.
         Formula: RVU * Units * Conversion Factor.

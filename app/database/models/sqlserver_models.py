@@ -17,6 +17,18 @@ Base = declarative_base()
 
 # --- DBO Schema (SQL Server) ---
 
+class RvuData(Base):
+    """ dbo.RvuData table """
+    __tablename__ = 'RvuData'
+    __table_args__ = {'schema': 'dbo'}
+
+    RvuDataId = Column(Integer, primary_key=True, autoincrement=True)
+    CptCode = Column(NVARCHAR(10), unique=True, nullable=False)
+    Description = Column(NVARCHAR)
+    RvuValue = Column(DECIMAL(10, 2), nullable=False)
+    CreatedDate = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 class ProductionOrganization(Base):
     """ dbo.Organizations table """
     __tablename__ = 'Organizations'

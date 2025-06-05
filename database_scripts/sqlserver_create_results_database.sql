@@ -205,6 +205,23 @@ CREATE TABLE dbo.ClinicalDepartments (
 ) WITH (DATA_COMPRESSION = ROW);
 GO
 
+-- ===========================
+-- RVU DATA TABLE
+-- ===========================
+CREATE TABLE dbo.RvuData (
+    RvuDataId INT IDENTITY(1,1) PRIMARY KEY,
+    CptCode NVARCHAR(10) NOT NULL,
+    Description NVARCHAR(MAX),
+    RvuValue DECIMAL(10, 2) NOT NULL,
+    CreatedDate DATETIME2 DEFAULT GETDATE(),
+    CONSTRAINT UQ_RvuData_CptCode UNIQUE (CptCode)
+) WITH (DATA_COMPRESSION = PAGE);
+GO
+
+CREATE INDEX IX_RvuData_CptCode ON dbo.RvuData(CptCode) INCLUDE (RvuValue) WITH (DATA_COMPRESSION = PAGE);
+GO
+
+
 CREATE TABLE dbo.Claims (
     ClaimId NVARCHAR(50) NOT NULL,
     FacilityId NVARCHAR(50) REFERENCES dbo.Facilities(FacilityId), 

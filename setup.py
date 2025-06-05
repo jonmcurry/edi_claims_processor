@@ -4,6 +4,7 @@ import psycopg2
 import pyodbc
 from pathlib import Path
 from datetime import datetime, timedelta
+import pandas as pd
 # Attempt to import pyDatalog, but make its usage conditional
 try:
     import pyDatalog
@@ -33,6 +34,7 @@ SQLSERVER_CONN = {
 }
 PG_SCHEMA = Path("database_scripts/postgresql_create_edi_databases.sql")
 SQL_SCHEMA = Path("database_scripts/sqlserver_create_results_database.sql")
+RVU_DATA_CSV = Path("data/rvu_data/rvu_table.csv")
 
 # --- DATABASE CREATION HELPERS ---
 
@@ -85,6 +87,62 @@ def create_sqlserver_database_if_not_exists():
             print(f"SQL Server database {SQLSERVER_CONN['database']} already exists.")
     except pyodbc.Error as e:
         print(f"Error connecting to or creating SQL Server database: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def load_rvu_data_to_sql_server():
+    """Reads RVU data from CSV and loads it into the SQL Server RvuData table."""
+    if not RVU_DATA_CSV.exists():
+        print(f"Warning: RVU data file not found at {RVU_DATA_CSV}. Skipping RVU data load.")
+        return
+
+    print(f"Loading RVU data from {RVU_DATA_CSV} into SQL Server...")
+    conn = None
+    try:
+        conn_str = (
+            f"DRIVER={SQLSERVER_CONN['driver']};SERVER={SQLSERVER_CONN['server']};"
+            f"DATABASE={SQLSERVER_CONN['database']};UID={SQLSERVER_CONN['uid']};"
+            f"PWD={SQLSERVER_CONN['pwd']};TrustServerCertificate=yes;"
+        )
+        conn = pyodbc.connect(conn_str, autocommit=False)
+        cur = conn.cursor()
+
+        # Clear existing data to prevent duplicates on re-run
+        cur.execute("DELETE FROM dbo.RvuData")
+        print("Cleared existing data from dbo.RvuData.")
+
+        df = pd.read_csv(RVU_DATA_CSV)
+        
+        insert_query = "INSERT INTO dbo.RvuData (CptCode, Description, RvuValue) VALUES (?, ?, ?)"
+        
+        data_to_insert = []
+        for index, row in df.iterrows():
+            # Ensure 'rvu_value' column exists and handle potential NaN
+            rvu_val = row.get('rvu_value')
+            if pd.isna(rvu_val):
+                print(f"Warning: Skipping row for CPT {row.get('cpt_code')} due to missing rvu_value.")
+                continue
+            
+            data_to_insert.append((
+                str(row.get('cpt_code')),
+                str(row.get('description')),
+                float(rvu_val)
+            ))
+
+        if data_to_insert:
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit()
+            print(f"Successfully loaded {len(data_to_insert)} records into dbo.RvuData.")
+        else:
+            print("No valid RVU data found to load.")
+
+    except pd.errors.EmptyDataError:
+        print(f"Warning: RVU data file {RVU_DATA_CSV} is empty.")
+    except Exception as e:
+        print(f"Error loading RVU data to SQL Server: {e}")
+        if conn:
+            conn.rollback()
     finally:
         if conn:
             conn.close()
@@ -599,6 +657,9 @@ def main():
         else:
             print(f"SQL Server schema file {SQL_SCHEMA} not found. CRITICAL: Setup cannot continue.")
             return
+
+        print("\n--- Step 3.5: Loading RVU Data into SQL Server ---")
+        load_rvu_data_to_sql_server()
 
         print("\n--- Step 4: Generating Facility Framework Data ---")
         org_codes, reg_codes, fac_ids_list, fc_codes_list_master, p_codes_list_master, dept_ids_master, fac_details = \
