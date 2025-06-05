@@ -898,7 +898,7 @@ SELECT
     i.name as IndexName, 
     p.partition_number, 
     p.data_compression_desc as CompressionType, 
-    p.rows as PartitionRows, 
+    p.rows as PartitionRows, -- Changed alias from RowCount to PartitionRows
     CAST(SUM(au.total_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as SizeMB, 
     CAST(SUM(au.used_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as UsedMB,
     CAST(SUM(au.data_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as DataMB
@@ -968,13 +968,13 @@ GRANT SELECT ON dbo.FinancialClasses TO ClaimsProcessorApp;
 GRANT SELECT ON dbo.Organizations TO ClaimsProcessorApp;
 GRANT SELECT ON dbo.Regions TO ClaimsProcessorApp;
 GRANT SELECT ON dbo.StandardPayers TO ClaimsProcessorApp;
-GRANT REFERENCES ON TYPE::dbo.ClaimIdServiceDateList TO ClaimsProcessorApp; -- Corrected from EXECUTE to REFERENCES
+GRANT REFERENCES ON TYPE::dbo.ClaimIdServiceDateList TO ClaimsProcessorApp; 
 GRANT EXECUTE ON dbo.sp_ValidateFacilityClaimAssignment TO ClaimsProcessorApp;
 GRANT EXECUTE ON dbo.sp_BulkAssignClaimsToFacility TO ClaimsProcessorApp;
 GO
 
 GRANT SELECT ON SCHEMA::dbo TO ClaimsAnalyst; 
-GRANT EXECUTE ON dbo.fn_GetFacilitySummary TO ClaimsAnalyst;
+GRANT SELECT ON dbo.fn_GetFacilitySummary TO ClaimsAnalyst; -- Corrected from EXECUTE to SELECT for iTVF
 GO
 
 GRANT CONTROL ON DATABASE::edi_production TO ClaimsAdmin; 
