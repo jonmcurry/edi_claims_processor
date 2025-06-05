@@ -96,11 +96,9 @@ def random_string(length=8):
 
 def random_date(start_date_obj, end_date_obj):
     if start_date_obj > end_date_obj:
-        # If start_date is somehow after end_date due to calculation, just return end_date
-        # This can happen if timedelta calculations result in a negative span.
         return end_date_obj
     delta = end_date_obj - start_date_obj
-    if delta.days < 0 : # Should be caught by above, but safety.
+    if delta.days < 0 : 
         return end_date_obj
     random_days = random.randint(0, delta.days)
     return (start_date_obj + timedelta(days=random_days))
@@ -111,7 +109,7 @@ def generate_facility_framework_data(n_orgs=5, n_regions=10, n_facilities=50, n_
     facility_ids = [f"FAC{str(i).zfill(3)}" for i in range(1, n_facilities + 1)]
     financial_class_codes = [f"FC{str(i).zfill(3)}" for i in range(1, n_financial_classes + 1)]
     payer_codes = [f"PAYER{str(i).zfill(3)}" for i in range(1, n_payers + 1)]
-    department_codes = [f"DEPT{str(i).zfill(3)}" for i in range(1, n_departments + 1)]
+    department_master_ids = [i for i in range(1, n_departments + 1)] 
 
     facility_details_list = []
     for fac_id in facility_ids:
@@ -121,41 +119,40 @@ def generate_facility_framework_data(n_orgs=5, n_regions=10, n_facilities=50, n_
             "region_code": random.choice(region_codes),
             "financial_class_code": random.choice(financial_class_codes),
             "payer_code": random.choice(payer_codes),
-            "department_code": random.choice(department_codes)
+            "department_code": f"DEPT{str(random.choice(department_master_ids)).zfill(3)}" 
         })
-    return organization_codes, region_codes, facility_ids, financial_class_codes, payer_codes, department_codes, facility_details_list
+    return organization_codes, region_codes, facility_ids, financial_class_codes, payer_codes, department_master_ids, facility_details_list
 
-def generate_random_claims(facility_ids, financial_class_codes, n_claims=100000):
+
+def generate_random_claims(facility_ids, financial_class_codes, department_ids, n_claims=100000): # Default changed
     """Generates random claim data with dates suitable for PostgreSQL partitions."""
     claims = []
     today = datetime.now().date()
-    # Generate dates within a tighter window to align with PG partitions: CurrentDate - 3 months to CurrentDate + 3 months
     date_range_start = today - timedelta(days=90) 
     date_range_end = today + timedelta(days=90)   
 
     current_year = datetime.now().year
     dob_start_date = datetime(1950, 1, 1).date()
-    # Ensure dob_end_date is valid (at least 18 years ago)
     if current_year - 18 < 1950:
         dob_end_date = dob_start_date
     else:
         dob_end_date = datetime(current_year - 18, 12, 31).date()
 
     for _ in range(n_claims):
-        if not facility_ids or not financial_class_codes:
-            print("Warning: facility_ids or financial_class_codes is empty in generate_random_claims. Skipping claim generation.")
+        if not facility_ids or not financial_class_codes or not department_ids:
+            print("Warning: facility_ids, financial_class_codes, or department_ids is empty in generate_random_claims.")
             break
         
         fac_id = random.choice(facility_ids)
         fc_code = random.choice(financial_class_codes)
+        dept_id = random.choice(department_ids) if department_ids else None 
         
         start_dt = random_date(date_range_start, date_range_end)
         
         end_dt_offset_max = (date_range_end - start_dt).days if date_range_end > start_dt else 0
-        end_dt_offset_max = min(end_dt_offset_max, 30) # Cap at 30 days for claim duration
+        end_dt_offset_max = min(end_dt_offset_max, 30) 
         end_dt_offset = random.randint(0, end_dt_offset_max)
         end_dt = start_dt + timedelta(days=end_dt_offset)
-
 
         service_line_start_dt_max_offset = (end_dt - start_dt).days if end_dt >= start_dt else 0
         service_line_start_dt = start_dt + timedelta(days=random.randint(0, service_line_start_dt_max_offset))
@@ -163,17 +160,30 @@ def generate_random_claims(facility_ids, financial_class_codes, n_claims=100000)
         service_line_end_dt_max_offset = (end_dt - service_line_start_dt).days if end_dt >= service_line_start_dt else 0
         service_line_end_dt = service_line_start_dt + timedelta(days=random.randint(0, service_line_end_dt_max_offset))
 
+        patient_age_val = random.randint(18, 90)
+        total_charge_amount_val = round(random.uniform(50.0, 10000.0), 2)
 
         claim = {
             "claim_id": random_string(12),
             "facility_id": fac_id,
+            "department_id": dept_id, 
+            "financial_class": fc_code, 
+            "patient_id": random_string(10), 
+            "patient_age": patient_age_val, 
+            "patient_dob": random_date(dob_start_date, dob_end_date), # Key is "patient_dob"
+            "patient_sex": random.choice(['M', 'F', 'U']), 
             "patient_account": random_string(10),
-            "start_date": start_dt,
-            "end_date": end_dt,
-            "financial_class": fc_code,
-            "dob": random_date(dob_start_date, dob_end_date),
-            "service_line_start": service_line_start_dt,
-            "service_line_end": service_line_end_dt,
+            "provider_id": random_string(8), 
+            "provider_type": random.choice(["Individual", "Group", "Facility"]), 
+            "rendering_provider_npi": random_string(10) if random.choice([True, False]) else None, 
+            "place_of_service": str(random.randint(11, 99)), 
+            "start_date": start_dt, 
+            "end_date": end_dt, 
+            "total_charge_amount": total_charge_amount_val, 
+            "total_claim_charges": round(total_charge_amount_val * random.uniform(0.95, 1.05), 2), 
+            "payer_name": f"Payer_{random_string(5)}", 
+            "primary_insurance_id": random_string(15) if random.choice([True, False]) else None, 
+            "secondary_insurance_id": random_string(15) if random.choice([True, False, False]) else None, 
             "rvu": round(random.uniform(0.5, 5.0), 2),
             "units": random.randint(1, 10)
         }
@@ -207,7 +217,7 @@ def run_sqlserver_sql(sql_path):
                     cur.execute(clean_stmt_batch)
                 except pyodbc.Error as e:
                     print(f"Error executing SQL Server statement: {e}")
-                    print(f"Failing Statement Batch (first 1000 chars):\n---\n{clean_stmt_batch[:100000]}...\n---")
+                    print(f"Failing Statement Batch (first 1000 chars):\n---\n{clean_stmt_batch[:1000]}...\n---")
                     raise 
         conn.commit()
         print(f"SQL Server script {sql_path} executed successfully.")
@@ -305,7 +315,7 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
             reg_code_fk = fac_detail["region_code"]
             financial_class_id_val = fac_detail["financial_class_code"]
             payer_code_fk_for_fc = fac_detail["payer_code"]
-            department_code_val = fac_detail["department_code"]
+            department_code_val = fac_detail["department_code"] 
             try:
                 org_db_id = org_id_map.get(org_code_fk)
                 reg_db_id = reg_id_map.get(reg_code_fk)
@@ -328,13 +338,13 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
                     cur.execute("""
                         IF NOT EXISTS (SELECT 1 FROM dbo.FinancialClasses WHERE FinancialClassId = ?)
                         INSERT INTO dbo.FinancialClasses (FinancialClassId, FinancialClassDescription, StandardPayerId, FacilityId) VALUES (?, ?, ?, ?)
-                        """, financial_class_id_val, # For IF NOT EXISTS
-                             financial_class_id_val, fc_desc_val, payer_db_id_for_fc, facility_id_val) # For INSERT
+                        """, financial_class_id_val, 
+                             financial_class_id_val, fc_desc_val, payer_db_id_for_fc, facility_id_val) 
                 else:
                     print(f"Warning: Skipping FC {financial_class_id_val} for facility {facility_id_val} due to missing Payer ID for {payer_code_fk_for_fc}.")
                 
-                dept_desc_val, dept_type_val = f"Department {department_code_val}", "General"
-                # Separated SELECT and INSERT for ClinicalDepartments
+                dept_desc_val, dept_type_val = f"Department {department_code_val}", "General" 
+                
                 cur.execute("SELECT 1 FROM dbo.ClinicalDepartments WHERE ClinicalDepartmentCode = ? AND FacilityId = ?", 
                             department_code_val, facility_id_val)
                 if not cur.fetchone():
@@ -366,38 +376,135 @@ def insert_claims_postgres(claims_data_list):
     try:
         conn = psycopg2.connect(**POSTGRES_CONN)
         cur = conn.cursor()
-        for claim_item in claims_data_list:
-            cur.execute("""
-                INSERT INTO staging.claims (
-                    claim_id, facility_id, patient_account_number, service_date, financial_class_id, 
-                    patient_dob, total_charge_amount, processing_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (claim_id, service_date) DO NOTHING;
-            """, (
-                claim_item["claim_id"], claim_item["facility_id"], claim_item["patient_account"],
-                claim_item["start_date"], claim_item["financial_class"], claim_item["dob"],
-                round(random.uniform(100.0, 5000.0), 2), 'PENDING'
-            ))
-        conn.commit()
-        print(f"{cur.rowcount if cur else 0} claims affected in PostgreSQL.")
+        
+        sql_insert = """
+            INSERT INTO staging.claims (
+                claim_id, facility_id, department_id, financial_class_id, 
+                patient_id, patient_age, patient_dob, patient_sex, patient_account_number,
+                provider_id, provider_type, rendering_provider_npi, place_of_service,
+                service_date, total_charge_amount, total_claim_charges, 
+                payer_name, primary_insurance_id, secondary_insurance_id,
+                processing_status 
+            ) VALUES (
+                %(claim_id)s, %(facility_id)s, %(department_id)s, %(financial_class)s,
+                %(patient_id)s, %(patient_age)s, %(patient_dob)s, %(patient_sex)s, %(patient_account)s,
+                %(provider_id)s, %(provider_type)s, %(rendering_provider_npi)s, %(place_of_service)s,
+                %(start_date)s, %(total_charge_amount)s, %(total_claim_charges)s,
+                %(payer_name)s, %(primary_insurance_id)s, %(secondary_insurance_id)s,
+                'PENDING'
+            )
+            ON CONFLICT (claim_id, service_date) DO NOTHING;
+        """
+        
+        batch_size = 5000
+        for i in range(0, len(claims_data_list), batch_size):
+            batch = claims_data_list[i:i + batch_size]
+            for claim_item in batch:
+                 # Ensure all keys referenced in sql_insert exist in claim_item
+                required_keys = [
+                    "claim_id", "facility_id", "department_id", "financial_class", "patient_id",
+                    "patient_age", "patient_dob", "patient_sex", "patient_account", "provider_id",
+                    "provider_type", "rendering_provider_npi", "place_of_service", "start_date",
+                    "total_charge_amount", "total_claim_charges", "payer_name",
+                    "primary_insurance_id", "secondary_insurance_id"
+                ]
+                for key in required_keys:
+                    if key not in claim_item:
+                        # Provide a default or handle missing key
+                        # For example, for nullable fields, you might set to None
+                        # For now, printing a warning and skipping if a critical key is missing.
+                        # This shouldn't happen if generate_random_claims is correct.
+                        if key == "patient_dob": # Specifically handling the previous 'dob' error source
+                             claim_item[key] = claim_item.get("dob") # try to get it if it was old key
+                        if claim_item.get(key) is None: # If it's still None, assign a default or skip
+                            print(f"Warning: Missing key '{key}' in claim_item for claim_id {claim_item.get('claim_id', 'N/A')}. Setting to None or default.")
+                            if key in ["rendering_provider_npi", "primary_insurance_id", "secondary_insurance_id", "department_id"]:
+                                claim_item[key] = None # These can be NULL
+                            else: # For other potentially NOT NULL fields, this might still cause DB errors
+                                claim_item[key] = "MISSING_DATA" # Placeholder to avoid immediate KeyError
+
+                cur.execute(sql_insert, claim_item)
+            conn.commit()
+            print(f"Committed batch of {len(batch)} claims to PostgreSQL.")
+
+        print(f"Finished inserting claims into PostgreSQL.")
     except psycopg2.Error as e:
         print(f"Error inserting claims into PostgreSQL: {e}")
         if conn: conn.rollback()
+    except KeyError as ke: # Catch KeyError specifically
+        print(f"KeyError during PostgreSQL claim insertion: {ke}. Check claim_item dictionary keys.")
+        if conn: conn.rollback()
     except Exception as e:
-        print(f"Unexpected error during PostgreSQL claim insertion: {e}")
+        print(f"An unexpected error during PostgreSQL claim insertion: {e}")
         if conn: conn.rollback()
     finally:
         if cur: cur.close()
         if conn: conn.close()
 
+def query_sample_claims_postgres(limit=10):
+    """Queries and prints a sample of claims from PostgreSQL staging.claims."""
+    print(f"\n--- Querying Sample Claims from PostgreSQL (Top {limit}) ---")
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        cur = conn.cursor()
+        
+        query = f"""
+            SELECT 
+                claim_id,
+                facility_id,
+                department_id, 
+                patient_id, 
+                patient_age, 
+                patient_sex, 
+                provider_id, 
+                provider_type, 
+                rendering_provider_npi, 
+                place_of_service, 
+                service_date,
+                total_charge_amount,
+                total_claim_charges, 
+                payer_name, 
+                primary_insurance_id, 
+                secondary_insurance_id,
+                financial_class_id,
+                processing_status
+            FROM staging.claims
+            ORDER BY created_date DESC
+            LIMIT {limit};
+        """
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+        if not rows:
+            print("No claims found in staging.claims.")
+            return
+
+        colnames = [desc[0] for desc in cur.description]
+        print(" | ".join(colnames))
+        print("-" * (sum(len(cn) for cn in colnames) + (len(colnames) - 1) * 3)) 
+        for row in rows:
+            print(" | ".join(str(value) if value is not None else "NULL" for value in row))
+            
+    except psycopg2.Error as e:
+        print(f"Error querying claims from PostgreSQL: {e}")
+    except Exception as e:
+        print(f"An unexpected error during PostgreSQL sample query: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+
 def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules=50):
     rules = []
+    if not PYDATALOG_AVAILABLE: return rules 
     if not facility_ids_list and not financial_class_codes_list: return rules
     for _ in range(n_rules):
         choices = []
         if facility_ids_list: choices.append("facility")
         if financial_class_codes_list: choices.append("financial_class")
-        if not choices: choices.append("units") # Fallback to units if other lists are empty
+        if not choices: choices.append("units") 
         
         rule_type = random.choice(choices)
         if rule_type == "facility": rules.append(f"valid_claim(CLAIM) <= claim(CLAIM, '{random.choice(facility_ids_list)}', _, _, _, _, _, _, _, _, _)")
@@ -407,7 +514,7 @@ def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules
 
 def test_pydatalog_rules(claims_data, generated_rules):
     if not PYDATALOG_AVAILABLE:
-        print("pyDatalog module not imported. Skipping pyDatalog tests.")
+        print("pyDatalog module not imported or available. Skipping pyDatalog tests.")
         return
     if not claims_data or not generated_rules:
         print("Skipping pyDatalog test due to empty claims or rules.")
@@ -415,16 +522,16 @@ def test_pydatalog_rules(claims_data, generated_rules):
 
     print("Attempting pyDatalog tests. Note: This section may require user adaptation based on their pyDatalog version and API.")
     try:
-        # Check for modern pyDatalog.Logic() pattern
         if hasattr(pyDatalog, 'Logic'):
             logic = pyDatalog.Logic()
-            print("  pyDatalog.Logic() instance created. Further interaction (add_clause, ask) would use this 'logic' object.")
-            print("  Current script uses global pyDatalog calls which might not be compatible with this 'Logic' instance pattern.")
-            print("  Skipping detailed pyDatalog interaction; user may need to adapt this section for their pyDatalog version.")
-            return # Exit early as global calls below will likely fail or not use 'logic'
+            # Ensure terms used in rules and facts are declared for this Logic instance
+            # pyDatalog.create_terms('claim, valid_claim, CLAIM') # This would be global, not instance specific usually.
+            # For Logic instances, terms are often implicitly created or using logic. टर्म्स(...)
+            print("  pyDatalog.Logic() instance created. Interaction should use this 'logic' object (e.g., logic.add_clause, logic.ask).")
+            print("  The current script's global pyDatalog calls are likely incompatible.")
+            print("  Skipping detailed pyDatalog interaction; user adaptation needed for their pyDatalog version.")
+            return 
 
-        # Fallback for older style if Logic() is not the primary interface
-        # Try to clear context - this is highly version dependent
         cleared_context = False
         if hasattr(pyDatalog, 'clear'):
             pyDatalog.clear()
@@ -438,37 +545,36 @@ def test_pydatalog_rules(claims_data, generated_rules):
         if not cleared_context:
             print("  No standard pyDatalog clear method found. Results may be cumulative if script is re-run.")
 
-        sample_size = min(len(claims_data), 5) # Further reduced sample
-        print(f"  Attempting to assert {sample_size} facts...")
-        for c_item in random.sample(claims_data, sample_size):
-            if hasattr(pyDatalog, 'assert_fact'):
-                 pyDatalog.assert_fact('claim',
+        sample_size = min(len(claims_data), 5) 
+        print(f"  Attempting to assert {sample_size} facts using global pyDatalog.assert_fact...")
+        if hasattr(pyDatalog, 'assert_fact'):
+            for c_item in random.sample(claims_data, sample_size):
+                pyDatalog.assert_fact('claim',
                                       c_item["claim_id"], c_item["facility_id"], c_item["patient_account"],
                                       str(c_item["start_date"]), str(c_item["end_date"]), c_item["financial_class"],
-                                      str(c_item["dob"]), str(c_item["service_line_start"]), str(c_item["service_line_end"]),
+                                      str(c_item["patient_dob"]), 
+                                      str(c_item.get("service_line_start", "")), str(c_item.get("service_line_end", "")), 
                                       float(c_item["rvu"]), int(c_item["units"]))
-            else:
-                print("  pyDatalog.assert_fact not found. Cannot assert facts.")
-                break 
+        else:
+            print("  pyDatalog.assert_fact not found.")
         
-        print("  Attempting to load rules...")
-        for rule_str in random.sample(generated_rules, min(len(generated_rules), 5)): # Test a few rules
-            if hasattr(pyDatalog, 'load'):
+        print("  Attempting to load rules using global pyDatalog.load...")
+        if hasattr(pyDatalog, 'load'):
+            for rule_str in random.sample(generated_rules, min(len(generated_rules), 5)):
                 pyDatalog.load(rule_str)
-            else:
-                print("  pyDatalog.load not found. Cannot load rules.")
-                break
+        else:
+            print("  pyDatalog.load not found.")
         
-        print("  Attempting to ask query...")
+        print("  Attempting to ask query using global pyDatalog.ask...")
         if hasattr(pyDatalog, 'ask'):
             result = pyDatalog.ask('valid_claim(CLAIM)')
             if result: print(f"  Datalog: {len(result.answers)} claims matched a rule from sample.")
             else: print("  Datalog: No claims matched any rule from sample.")
         else:
-            print("  pyDatalog.ask not found. Cannot query.")
+            print("  pyDatalog.ask not found.")
 
     except AttributeError as ae:
-        print(f"  pyDatalog AttributeError: {ae}. The pyDatalog API used may be incompatible with your installed version.")
+        print(f"  pyDatalog AttributeError: {ae}. Your pyDatalog version may require using a pyDatalog.Logic() object and its methods.")
     except Exception as e:
         print(f"  An error occurred during pyDatalog testing: {e}")
 
@@ -495,15 +601,18 @@ def main():
             return
 
         print("\n--- Step 4: Generating Facility Framework Data ---")
-        org_codes, reg_codes, fac_ids_list, fc_codes_list_master, p_codes_list_master, dept_codes_list_master, fac_details = \
+        org_codes, reg_codes, fac_ids_list, fc_codes_list_master, p_codes_list_master, dept_ids_master, fac_details = \
             generate_facility_framework_data(n_orgs=3, n_regions=2, n_facilities=10, n_financial_classes=5, n_payers=5, n_departments=5)
 
         print("\n--- Step 5: Populating SQL Server Facility Framework ---")
-        insert_facility_framework_sqlserver(fac_details, org_codes, reg_codes, fc_codes_list_master, p_codes_list_master, dept_codes_list_master)
+        insert_facility_framework_sqlserver(fac_details, org_codes, reg_codes, fc_codes_list_master, p_codes_list_master, dept_ids_master)
 
         print("\n--- Step 6: Generating and Inserting Claims into PostgreSQL Staging ---")
-        claims_for_pg = generate_random_claims(fac_ids_list, fc_codes_list_master, n_claims=100000)
+        claims_for_pg = generate_random_claims(fac_ids_list, fc_codes_list_master, dept_ids_master, n_claims=100000) # Changed to 100,000
         insert_claims_postgres(claims_for_pg)
+        
+        query_sample_claims_postgres(limit=5)
+
 
         print("\n--- Step 7: Generating pyDatalog Rules ---")
         datalog_rules = generate_random_rules(fac_ids_list, fc_codes_list_master, n_rules=50)
