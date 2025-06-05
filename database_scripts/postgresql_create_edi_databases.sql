@@ -3,12 +3,12 @@
 -- This database is used for staging claims data, reference data caches,
 -- and core facility/organization master data with advanced performance features.
 
-CREATE DATABASE edi_staging
-    WITH
-    OWNER = postgres -- Or another appropriate owner
-    ENCODING = 'UTF8'
-    TABLESPACE = pg_default
-    CONNECTION LIMIT = -1;
+-- CREATE DATABASE edi_staging
+--     WITH
+--     OWNER = postgres -- Or another appropriate owner
+--     ENCODING = 'UTF8'
+--     TABLESPACE = pg_default
+--     CONNECTION LIMIT = -1;
 
 -- Create edi schema for core master data (organizations, facilities, etc.)
 CREATE SCHEMA IF NOT EXISTS edi;
@@ -26,7 +26,7 @@ CREATE SCHEMA IF NOT EXISTS analytics;
 -- Enable query planning optimizations
 SET work_mem = '256MB';
 SET maintenance_work_mem = '1GB';
-SET shared_buffers = '2GB';
+--SET shared_buffers = '2GB';
 SET effective_cache_size = '8GB';
 SET random_page_cost = 1.1;
 SET seq_page_cost = 1.0;
@@ -449,6 +449,7 @@ CREATE TABLE staging.facilities_cache (
     facility_id VARCHAR(50) PRIMARY KEY,
     facility_name VARCHAR(200),
     facility_type VARCHAR(20),
+	state_code CHAR(2),
     critical_access CHAR(1),
     organization_id INTEGER, -- references edi.organizations
     region_id INTEGER,       -- references edi.regions
@@ -573,66 +574,66 @@ COMMENT ON TABLE edi.retry_queue IS 'Queue for chunks that failed processing and
 -- ===========================
 
 -- edi schema indexes with query optimization
-CREATE INDEX CONCURRENTLY idx_organizations_active_name ON edi.organizations(active, organization_name) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_regions_active_code ON edi.regions(active, region_code) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_facilities_active_lookup ON edi.facilities(facility_id, active, organization_id) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_facilities_state_type ON edi.facilities(state_code, facility_type) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_financial_classes_facility_active ON edi.financial_classes(facility_id, active) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_clinical_departments_facility_active ON edi.clinical_departments(facility_id, active) WHERE active = TRUE;
+CREATE INDEX idx_organizations_active_name ON edi.organizations(active, organization_name) WHERE active = TRUE;
+CREATE INDEX idx_regions_active_code ON edi.regions(active, region_code) WHERE active = TRUE;
+CREATE INDEX idx_facilities_active_lookup ON edi.facilities(facility_id, active, organization_id) WHERE active = TRUE;
+CREATE INDEX idx_facilities_state_type ON edi.facilities(state_code, facility_type) WHERE active = TRUE;
+CREATE INDEX idx_financial_classes_facility_active ON edi.financial_classes(facility_id, active) WHERE active = TRUE;
+CREATE INDEX idx_clinical_departments_facility_active ON edi.clinical_departments(facility_id, active) WHERE active = TRUE;
 
 -- Advanced filter index for active latest rules
-CREATE INDEX CONCURRENTLY idx_edi_filters_optimized ON edi.filters(filter_name, rule_type) 
+CREATE INDEX idx_edi_filters_optimized ON edi.filters(filter_name, rule_type) 
     WHERE is_active = TRUE AND is_latest_version = TRUE;
 
 -- Staging claims advanced indexes with partial and composite strategies
-CREATE INDEX CONCURRENTLY idx_staging_claims_processing_status_date ON staging.claims(processing_status, service_date, facility_id) 
+CREATE INDEX idx_staging_claims_processing_status_date ON staging.claims(processing_status, service_date, facility_id) 
     WHERE exported_to_production = FALSE;
 
-CREATE INDEX CONCURRENTLY idx_staging_claims_facility_validation ON staging.claims(facility_id, facility_validated, processing_status)
+CREATE INDEX idx_staging_claims_facility_validation ON staging.claims(facility_id, facility_validated, processing_status)
     WHERE exported_to_production = FALSE;
 
-CREATE INDEX CONCURRENTLY idx_staging_claims_export_ready ON staging.claims(exported_to_production, processing_status, service_date)
+CREATE INDEX idx_staging_claims_export_ready ON staging.claims(exported_to_production, processing_status, service_date)
     WHERE processing_status IN ('COMPLETED', 'VALIDATED');
 
 -- Hash index for fast claim lookups
-CREATE INDEX CONCURRENTLY idx_staging_claims_hash_lookup ON staging.claims USING HASH(hash_key);
+CREATE INDEX idx_staging_claims_hash_lookup ON staging.claims USING HASH(hash_key);
 
 -- GIN index for JSONB fields
-CREATE INDEX CONCURRENTLY idx_staging_claims_claim_data_gin ON staging.claims USING GIN(claim_data);
-CREATE INDEX CONCURRENTLY idx_staging_claims_datalog_outcomes_gin ON staging.claims USING GIN(datalog_rule_outcomes);
+CREATE INDEX idx_staging_claims_claim_data_gin ON staging.claims USING GIN(claim_data);
+CREATE INDEX idx_staging_claims_datalog_outcomes_gin ON staging.claims USING GIN(datalog_rule_outcomes);
 
 -- Full-text search index
-CREATE INDEX CONCURRENTLY idx_staging_claims_search_vector ON staging.claims USING GIN(search_vector);
+CREATE INDEX idx_staging_claims_search_vector ON staging.claims USING GIN(search_vector);
 
 -- Multi-column indexes for common query patterns
-CREATE INDEX CONCURRENTLY idx_staging_claims_multi_validation ON staging.claims(facility_validated, department_validated, financial_class_validated, processing_status);
+CREATE INDEX idx_staging_claims_multi_validation ON staging.claims(facility_validated, department_validated, financial_class_validated, processing_status);
 
 -- Diagnosis and line item optimized indexes
-CREATE INDEX CONCURRENTLY idx_cms1500_diagnoses_claim_service ON staging.cms1500_diagnoses(claim_id, service_date, icd_code);
-CREATE INDEX CONCURRENTLY idx_cms1500_diagnoses_icd_primary ON staging.cms1500_diagnoses(icd_code, is_primary) WHERE is_primary = TRUE;
+CREATE INDEX idx_cms1500_diagnoses_claim_service ON staging.cms1500_diagnoses(claim_id, service_date, icd_code);
+CREATE INDEX idx_cms1500_diagnoses_icd_primary ON staging.cms1500_diagnoses(icd_code, is_primary) WHERE is_primary = TRUE;
 
-CREATE INDEX CONCURRENTLY idx_cms1500_line_items_claim_service ON staging.cms1500_line_items(claim_id, service_date, cpt_code);
-CREATE INDEX CONCURRENTLY idx_cms1500_line_items_cpt_charges ON staging.cms1500_line_items(cpt_code, line_charge_amount);
-CREATE INDEX CONCURRENTLY idx_cms1500_line_items_reimbursement ON staging.cms1500_line_items(estimated_reimbursement_amount) 
+CREATE INDEX idx_cms1500_line_items_claim_service ON staging.cms1500_line_items(claim_id, service_date, cpt_code);
+CREATE INDEX idx_cms1500_line_items_cpt_charges ON staging.cms1500_line_items(cpt_code, line_charge_amount);
+CREATE INDEX idx_cms1500_line_items_reimbursement ON staging.cms1500_line_items(estimated_reimbursement_amount) 
     WHERE estimated_reimbursement_amount IS NOT NULL;
 
 -- Validation results optimized indexes
-CREATE INDEX CONCURRENTLY idx_validation_results_claim_type_status ON staging.validation_results(claim_id, validation_type, validation_status);
-CREATE INDEX CONCURRENTLY idx_validation_results_performance ON staging.validation_results(validation_type, processing_time, created_date);
-CREATE INDEX CONCURRENTLY idx_validation_results_ml_stats ON staging.validation_results(model_version, ml_inference_time) 
+CREATE INDEX idx_validation_results_claim_type_status ON staging.validation_results(claim_id, validation_type, validation_status);
+CREATE INDEX idx_validation_results_performance ON staging.validation_results(validation_type, processing_time, created_date);
+CREATE INDEX idx_validation_results_ml_stats ON staging.validation_results(model_version, ml_inference_time) 
     WHERE ml_inference_time IS NOT NULL;
 
 -- Cache table indexes optimized for lookup patterns
-CREATE INDEX CONCURRENTLY idx_facilities_cache_active_lookup ON staging.facilities_cache(facility_id, active) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_departments_cache_facility_active ON staging.departments_cache(facility_id, active) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_financial_classes_cache_facility_active ON staging.financial_classes_cache(facility_id, active) WHERE active = TRUE;
-CREATE INDEX CONCURRENTLY idx_standard_payers_cache_code_active ON staging.standard_payers_cache(standard_payer_code, active) WHERE active = TRUE;
+CREATE INDEX idx_facilities_cache_active_lookup ON staging.facilities_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX idx_departments_cache_facility_active ON staging.departments_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX idx_financial_classes_cache_facility_active ON staging.financial_classes_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX idx_standard_payers_cache_code_active ON staging.standard_payers_cache(standard_payer_code, active) WHERE active = TRUE;
 
 -- Processing tracking indexes with performance focus
-CREATE INDEX CONCURRENTLY idx_processing_batches_status_date ON staging.processing_batches(status, created_date);
-CREATE INDEX CONCURRENTLY idx_claim_batches_batch_assigned ON staging.claim_batches(batch_id, assigned_date);
-CREATE INDEX CONCURRENTLY idx_processing_errors_claim_date ON staging.processing_errors(claim_id, created_date);
-CREATE INDEX CONCURRENTLY idx_processing_errors_type_date ON staging.processing_errors(error_type, created_date);
+CREATE INDEX idx_processing_batches_status_date ON staging.processing_batches(status, created_date);
+CREATE INDEX idx_claim_batches_batch_assigned ON staging.claim_batches(batch_id, assigned_date);
+CREATE INDEX idx_processing_errors_claim_date ON staging.processing_errors(claim_id, created_date);
+CREATE INDEX idx_processing_errors_type_date ON staging.processing_errors(error_type, created_date);
 
 -- ===========================
 -- MATERIALIZED VIEWS FOR ANALYTICS
@@ -684,28 +685,55 @@ GROUP BY f.facility_id, f.facility_name, f.facility_type, f.state_code, DATE_TRU
 CREATE UNIQUE INDEX idx_facility_performance_unique ON analytics.facility_performance(facility_id, service_day);
 COMMENT ON MATERIALIZED VIEW analytics.facility_performance IS 'Daily facility performance metrics for analytics and reporting.';
 
--- Validation failure patterns analysis
 CREATE MATERIALIZED VIEW analytics.validation_failure_patterns AS
+WITH error_counts AS (
+    SELECT
+        vr.validation_type,
+        vr.validation_status,
+        vr.model_version,
+        DATE_TRUNC('day', vr.created_date) AS validation_day,
+        COALESCE(vr.validation_details->>'error_type', 'unknown') AS error_type,
+        COUNT(*) AS error_count
+    FROM staging.validation_results vr
+    WHERE vr.validation_status = 'FAILED'
+      AND vr.created_date >= CURRENT_DATE - INTERVAL '7 days'
+    GROUP BY 
+        vr.validation_type,
+        vr.validation_status,
+        vr.model_version,
+        DATE_TRUNC('day', vr.created_date),
+        COALESCE(vr.validation_details->>'error_type', 'unknown')
+)
 SELECT
-    vr.validation_type,
-    vr.validation_status,
-    vr.model_version,
-    DATE_TRUNC('day', vr.created_date) as validation_day,
-    COUNT(*) as failure_count,
-    AVG(vr.processing_time) as avg_processing_time,
-    AVG(vr.ml_inference_time) as avg_ml_inference_time,
-    AVG(vr.rule_engine_time) as avg_rule_engine_time,
-    -- Extract common error patterns from validation_details JSONB
-    jsonb_object_agg(
-        COALESCE(vr.validation_details->>'error_type', 'unknown'),
-        COUNT(*)
-    ) FILTER (WHERE vr.validation_status = 'FAILED') as error_type_counts
-FROM staging.validation_results vr
+    ec.validation_type,
+    ec.validation_status,
+    ec.model_version,
+    ec.validation_day,
+    COUNT(*) AS failure_count,
+    AVG(vr.processing_time) AS avg_processing_time,
+    AVG(vr.ml_inference_time) AS avg_ml_inference_time,
+    AVG(vr.rule_engine_time) AS avg_rule_engine_time,
+    JSONB_OBJECT_AGG(ec.error_type, ec.error_count) AS error_type_counts
+FROM error_counts ec
+JOIN staging.validation_results vr
+  ON ec.validation_type = vr.validation_type
+ AND ec.validation_status = vr.validation_status
+ AND ec.model_version = vr.model_version
+ AND DATE_TRUNC('day', vr.created_date) = ec.validation_day
 WHERE vr.created_date >= CURRENT_DATE - INTERVAL '7 days'
-GROUP BY vr.validation_type, vr.validation_status, vr.model_version, DATE_TRUNC('day', vr.created_date);
+GROUP BY 
+    ec.validation_type,
+    ec.validation_status,
+    ec.model_version,
+    ec.validation_day;
 
-CREATE UNIQUE INDEX idx_validation_failure_patterns_unique ON analytics.validation_failure_patterns(validation_type, validation_status, model_version, validation_day);
-COMMENT ON MATERIALIZED VIEW analytics.validation_failure_patterns IS 'Daily validation failure pattern analysis for troubleshooting.';
+-- Create a unique index for refresh performance and uniqueness constraint
+CREATE UNIQUE INDEX idx_validation_failure_patterns_unique 
+ON analytics.validation_failure_patterns(validation_type, validation_status, model_version, validation_day);
+
+-- Add comment for documentation
+COMMENT ON MATERIALIZED VIEW analytics.validation_failure_patterns IS 
+'Daily validation failure pattern analysis for troubleshooting, including error type breakdown.';
 
 -- Financial metrics materialized view
 CREATE MATERIALIZED VIEW analytics.financial_metrics AS
@@ -765,7 +793,7 @@ COMMENT ON MATERIALIZED VIEW analytics.ml_model_performance IS 'Hourly ML model 
 
 -- Function to refresh all materialized views
 CREATE OR REPLACE FUNCTION analytics.refresh_all_views()
-RETURNS TEXT AS $
+RETURNS TEXT AS $$
 DECLARE
     view_name TEXT;
     result_text TEXT := '';
@@ -779,7 +807,7 @@ BEGIN
         ORDER BY matviewname
     LOOP
         start_time := clock_timestamp();
-        EXECUTE 'REFRESH MATERIALIZED VIEW CONCURRENTLY ' || view_name;
+        EXECUTE 'REFRESH MATERIALIZED VIEW ' || view_name;
         end_time := clock_timestamp();
         result_text := result_text || view_name || ' refreshed in ' || 
                       EXTRACT(EPOCH FROM (end_time - start_time))::TEXT || ' seconds. ';
@@ -787,12 +815,12 @@ BEGIN
     
     RETURN result_text;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION analytics.refresh_all_views() IS 'Refreshes all materialized views in the analytics schema.';
 
 -- Function to update search vectors for full-text search
 CREATE OR REPLACE FUNCTION staging.update_claim_search_vectors()
-RETURNS INTEGER AS $
+RETURNS INTEGER AS $$
 DECLARE
     updated_count INTEGER;
 BEGIN
@@ -810,12 +838,12 @@ BEGIN
     GET DIAGNOSTICS updated_count = ROW_COUNT;
     RETURN updated_count;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION staging.update_claim_search_vectors() IS 'Updates search vectors for recently modified claims.';
 
 -- Function for intelligent partition management
 CREATE OR REPLACE FUNCTION staging.manage_partitions()
-RETURNS TEXT AS $
+RETURNS TEXT AS $$
 DECLARE
     table_name TEXT;
     future_partitions INTEGER := 0;
@@ -847,7 +875,7 @@ BEGIN
     result_text := 'Partition management completed. Future partitions scheduled.';
     RETURN result_text;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION staging.manage_partitions() IS 'Manages partition creation and cleanup automatically.';
 
 -- ===========================
@@ -924,7 +952,7 @@ COMMENT ON VIEW staging.v_high_volume_processing_stats IS 'High-performance hour
 -- ===========================
 
 CREATE OR REPLACE FUNCTION staging.update_claims_timestamp_optimized()
-RETURNS TRIGGER AS $
+RETURNS TRIGGER AS $$
 BEGIN
     -- Only update timestamp if substantive fields changed
     IF (OLD.processing_status IS DISTINCT FROM NEW.processing_status OR
@@ -952,7 +980,7 @@ BEGIN
     
     RETURN NEW;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS tr_staging_claims_updated_date ON staging.claims;
 CREATE TRIGGER tr_staging_claims_updated_date
@@ -970,9 +998,10 @@ CREATE OR REPLACE FUNCTION staging.bulk_update_processing_status(
     p_new_status VARCHAR(30),
     p_batch_size INTEGER DEFAULT 1000
 )
-RETURNS INTEGER AS $
+RETURNS INTEGER AS $$
 DECLARE
     updated_count INTEGER := 0;
+    batch_updated INTEGER := 0;
     batch_start INTEGER := 1;
     batch_end INTEGER;
     total_claims INTEGER := array_length(p_claim_ids, 1);
@@ -985,25 +1014,26 @@ BEGIN
         SET processing_status = p_new_status,
             updated_date = CURRENT_TIMESTAMP
         WHERE claim_id = ANY(p_claim_ids[batch_start:batch_end]);
-        
-        GET DIAGNOSTICS updated_count = updated_count + ROW_COUNT;
-        
-        -- Commit each batch
-        COMMIT;
+
+        -- Correct use of GET DIAGNOSTICS
+        GET DIAGNOSTICS batch_updated = ROW_COUNT;
+        updated_count := updated_count + batch_updated;
         
         batch_start := batch_end + 1;
     END LOOP;
-    
+
     RETURN updated_count;
 END;
-$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.bulk_update_processing_status(TEXT[], VARCHAR(30), INTEGER) IS 'High-performance bulk status updates with batching.';
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION staging.bulk_update_processing_status(TEXT[], VARCHAR(30), INTEGER)
+IS 'High-performance bulk status updates with batching. Avoids long-running transactions.';
 
 CREATE OR REPLACE FUNCTION staging.cleanup_old_data_optimized(
     p_days_to_keep INTEGER DEFAULT 30,
     p_batch_size INTEGER DEFAULT 10000
 )
-RETURNS TEXT AS $
+RETURNS TEXT AS $$
 DECLARE
     deleted_claims INTEGER := 0;
     deleted_validations INTEGER := 0;
@@ -1066,7 +1096,7 @@ BEGIN
     
     RETURN result_message;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION staging.cleanup_old_data_optimized(INTEGER, INTEGER) IS 'Optimized cleanup with batching and statistics updates.';
 
 -- ===========================
@@ -1075,7 +1105,7 @@ COMMENT ON FUNCTION staging.cleanup_old_data_optimized(INTEGER, INTEGER) IS 'Opt
 
 -- Create extension for additional performance features if not exists
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
-CREATE EXTENSION IF NOT EXISTS auto_explain;
+-- CREATE EXTENSION IF NOT EXISTS auto_explain;
 
 -- Configure auto_explain for query optimization
 SELECT set_config('auto_explain.log_min_duration', '1000', false); -- Log queries taking > 1 second
@@ -1089,7 +1119,7 @@ SELECT set_config('auto_explain.log_format', 'json', false);
 
 -- Function to be called by cron for automated maintenance
 CREATE OR REPLACE FUNCTION staging.automated_maintenance()
-RETURNS TEXT AS $
+RETURNS TEXT AS $$
 DECLARE
     result_text TEXT := '';
     maintenance_start TIMESTAMP := clock_timestamp();
@@ -1114,7 +1144,7 @@ BEGIN
     
     RETURN result_text;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION staging.automated_maintenance() IS 'Automated maintenance function for cron scheduling.';
 
 -- ===========================
@@ -1125,20 +1155,20 @@ CREATE OR REPLACE VIEW analytics.query_performance AS
 SELECT
     query,
     calls,
-    total_time,
-    mean_time,
+    total_exec_time AS total_time, -- Renamed from total_time
+    mean_exec_time AS mean_time,   -- Renamed from mean_time
     rows,
-    100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
+    100.0 * shared_blks_hit / NULLIF(shared_blks_hit + shared_blks_read, 0) AS hit_percent
 FROM pg_stat_statements
 WHERE query NOT LIKE '%pg_stat_statements%'
-ORDER BY total_time DESC
+ORDER BY total_exec_time DESC
 LIMIT 20;
 COMMENT ON VIEW analytics.query_performance IS 'Top 20 queries by total execution time for performance monitoring.';
 
 CREATE OR REPLACE VIEW analytics.table_performance AS
 SELECT
     schemaname,
-    tablename,
+    relname AS tablename,
     seq_scan,
     seq_tup_read,
     idx_scan,
