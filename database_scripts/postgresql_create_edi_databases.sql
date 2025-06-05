@@ -1,18 +1,41 @@
--- PostgreSQL Staging Database Schema for Claims Processing
--- ========================================================
+-- PostgreSQL Staging Database Schema for Claims Processing with Performance Optimizations
+-- =======================================================================================
 -- This database is used for staging claims data, reference data caches,
--- and core facility/organization master data.
+-- and core facility/organization master data with advanced performance features.
+
 CREATE DATABASE edi_staging
     WITH
     OWNER = postgres -- Or another appropriate owner
     ENCODING = 'UTF8'
     TABLESPACE = pg_default
     CONNECTION LIMIT = -1;
+
 -- Create edi schema for core master data (organizations, facilities, etc.)
 CREATE SCHEMA IF NOT EXISTS edi;
 
 -- Create staging schema for claims to be processed and reference data caches
 CREATE SCHEMA IF NOT EXISTS staging;
+
+-- Create analytics schema for materialized views and reporting
+CREATE SCHEMA IF NOT EXISTS analytics;
+
+-- ===========================
+-- PERFORMANCE CONFIGURATION
+-- ===========================
+
+-- Enable query planning optimizations
+SET work_mem = '256MB';
+SET maintenance_work_mem = '1GB';
+SET shared_buffers = '2GB';
+SET effective_cache_size = '8GB';
+SET random_page_cost = 1.1;
+SET seq_page_cost = 1.0;
+
+-- Enable parallel processing
+SET max_parallel_workers_per_gather = 4;
+SET max_parallel_workers = 8;
+SET parallel_tuple_cost = 0.1;
+SET parallel_setup_cost = 1000.0;
 
 -- ===========================
 -- EDI SCHEMA - MASTER DATA TABLES
@@ -64,7 +87,7 @@ CREATE TABLE edi.organization_regions (
 );
 COMMENT ON TABLE edi.organization_regions IS 'Many-to-many relationship between organizations and regions.';
 
--- Facilities table
+-- Facilities table with performance optimizations
 CREATE TABLE edi.facilities (
     facility_id VARCHAR(50) PRIMARY KEY, -- User-defined facility ID
     facility_name VARCHAR(200) NOT NULL,
@@ -90,7 +113,7 @@ CREATE TABLE edi.facilities (
     active BOOLEAN DEFAULT TRUE,
     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+) WITH (fillfactor = 85); -- Leave space for updates
 COMMENT ON TABLE edi.facilities IS 'Master data for healthcare facilities.';
 
 -- Standard Payers lookup table
@@ -188,35 +211,14 @@ COMMENT ON TABLE edi.filters IS 'Stores validation rules, Datalog rules, and oth
 COMMENT ON COLUMN edi.filters.rule_type IS 'Type of rule: DATALOG for pyDatalog, PYTHON_VALIDATION for claims_validation_engine rules, etc.';
 COMMENT ON COLUMN edi.filters.is_latest_version IS 'True if this is the most recent version of the rule with this filter_name.';
 
--- Ensure only one 'is_latest_version' per filter_name (requires a more complex constraint or trigger,
--- or application-level logic. For simplicity in SQL, this might be managed by the application).
-/*
-CREATE OR REPLACE FUNCTION edi.ensure_single_latest_version()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.is_latest_version = TRUE THEN
-        UPDATE edi.filters
-        SET is_latest_version = FALSE
-        WHERE filter_name = NEW.filter_name AND filter_id != NEW.filter_id;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER tr_filters_single_latest_version
-BEFORE INSERT OR UPDATE ON edi.filters
-FOR EACH ROW
-EXECUTE FUNCTION edi.ensure_single_latest_version();
-*/
-
-
 -- ===========================
--- STAGING SCHEMA - CLAIMS PROCESSING AND CACHES
+-- STAGING SCHEMA - CLAIMS PROCESSING AND CACHES WITH PARTITIONING
 -- ===========================
 
--- Staging claims table (main table for claims to be processed)
+-- Staging claims table with partitioning by service_date for high volume
+-- Using range partitioning by month for optimal query performance
 CREATE TABLE staging.claims (
-    claim_id VARCHAR(50) PRIMARY KEY,
+    claim_id VARCHAR(50) NOT NULL,
     facility_id VARCHAR(50), -- References edi.facilities(facility_id) - to be validated
     department_id INTEGER,   -- References edi.clinical_departments(department_id) - to be validated
     financial_class_id VARCHAR(50), -- References edi.financial_classes(financial_class_id) - to be validated
@@ -229,7 +231,7 @@ CREATE TABLE staging.claims (
     provider_type VARCHAR(100), -- Type of billing provider
     rendering_provider_npi VARCHAR(10), -- Rendering provider NPI if different
     place_of_service VARCHAR(10), -- From claim
-    service_date DATE,
+    service_date DATE NOT NULL, -- NOT NULL for partitioning
     total_charge_amount DECIMAL(12,2), -- Sum of line item charges
     total_claim_charges DECIMAL(10,2), -- Overall claim charges from source
     payer_name VARCHAR(100),
@@ -248,31 +250,84 @@ CREATE TABLE staging.claims (
     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     exported_to_production BOOLEAN DEFAULT FALSE,
-    export_date TIMESTAMP
-);
-COMMENT ON TABLE staging.claims IS 'Staging table for claims with facility assignments to be validated.';
+    export_date TIMESTAMP,
+    -- Performance enhancement fields
+    search_vector tsvector, -- Full-text search vector
+    hash_key INTEGER GENERATED ALWAYS AS (hashtext(claim_id || COALESCE(patient_account_number, ''))) STORED -- Hash for faster lookups
+) PARTITION BY RANGE (service_date);
+COMMENT ON TABLE staging.claims IS 'Staging table for claims with facility assignments to be validated. Partitioned by service_date for performance.';
 COMMENT ON COLUMN staging.claims.processing_status IS 'Current status of the claim in the processing pipeline.';
 COMMENT ON COLUMN staging.claims.datalog_rule_outcomes IS 'Stores outcomes from the Datalog rule engine for this claim.';
+COMMENT ON COLUMN staging.claims.search_vector IS 'Full-text search vector for claim data.';
+COMMENT ON COLUMN staging.claims.hash_key IS 'Pre-computed hash for faster lookups.';
 
+-- Create monthly partitions for claims (create for current year + 1 year ahead)
+-- This should be automated via cron job or application logic
+DO $$
+DECLARE
+    start_date DATE := DATE_TRUNC('month', CURRENT_DATE - INTERVAL '6 months');
+    end_date DATE := DATE_TRUNC('month', CURRENT_DATE + INTERVAL '18 months');
+    partition_start DATE;
+    partition_end DATE;
+    partition_name TEXT;
+BEGIN
+    WHILE start_date < end_date LOOP
+        partition_start := start_date;
+        partition_end := start_date + INTERVAL '1 month';
+        partition_name := 'claims_' || TO_CHAR(partition_start, 'YYYY_MM');
+        
+        EXECUTE format('CREATE TABLE IF NOT EXISTS staging.%I PARTITION OF staging.claims
+                       FOR VALUES FROM (%L) TO (%L)', 
+                       partition_name, partition_start, partition_end);
+        
+        start_date := partition_end;
+    END LOOP;
+END $$;
 
--- Staging CMS 1500 diagnosis codes
+-- Add primary key constraint to each partition
+ALTER TABLE staging.claims ADD CONSTRAINT pk_claims PRIMARY KEY (claim_id, service_date);
+
+-- Staging CMS 1500 diagnosis codes with partitioning
 CREATE TABLE staging.cms1500_diagnoses (
-    diagnosis_entry_id SERIAL PRIMARY KEY,
-    claim_id VARCHAR(50) REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    diagnosis_entry_id BIGSERIAL,
+    claim_id VARCHAR(50) NOT NULL,
+    service_date DATE NOT NULL, -- Added for partitioning alignment
     diagnosis_sequence INTEGER NOT NULL CHECK (diagnosis_sequence BETWEEN 1 AND 12),
     icd_code VARCHAR(10) NOT NULL,
     icd_code_type VARCHAR(10) DEFAULT 'ICD10',
     diagnosis_description TEXT,
     is_primary BOOLEAN DEFAULT FALSE,
-    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(claim_id, diagnosis_sequence)
-);
-COMMENT ON TABLE staging.cms1500_diagnoses IS 'Staging for CMS 1500 diagnosis codes (Section 21).';
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) PARTITION BY RANGE (service_date);
+COMMENT ON TABLE staging.cms1500_diagnoses IS 'Staging for CMS 1500 diagnosis codes (Section 21). Partitioned by service_date.';
 
--- Staging CMS 1500 procedures/line items
+-- Create corresponding diagnosis partitions
+DO $$
+DECLARE
+    start_date DATE := DATE_TRUNC('month', CURRENT_DATE - INTERVAL '6 months');
+    end_date DATE := DATE_TRUNC('month', CURRENT_DATE + INTERVAL '18 months');
+    partition_start DATE;
+    partition_end DATE;
+    partition_name TEXT;
+BEGIN
+    WHILE start_date < end_date LOOP
+        partition_start := start_date;
+        partition_end := start_date + INTERVAL '1 month';
+        partition_name := 'cms1500_diagnoses_' || TO_CHAR(partition_start, 'YYYY_MM');
+        
+        EXECUTE format('CREATE TABLE IF NOT EXISTS staging.%I PARTITION OF staging.cms1500_diagnoses
+                       FOR VALUES FROM (%L) TO (%L)', 
+                       partition_name, partition_start, partition_end);
+        
+        start_date := partition_end;
+    END LOOP;
+END $$;
+
+-- Staging CMS 1500 procedures/line items with partitioning
 CREATE TABLE staging.cms1500_line_items (
-    line_item_id SERIAL PRIMARY KEY,
-    claim_id VARCHAR(50) REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    line_item_id BIGSERIAL,
+    claim_id VARCHAR(50) NOT NULL,
+    service_date DATE NOT NULL, -- Added for partitioning alignment
     line_number INTEGER NOT NULL CHECK (line_number BETWEEN 1 AND 99),
     service_date_from DATE,
     service_date_to DATE,
@@ -290,16 +345,38 @@ CREATE TABLE staging.cms1500_line_items (
     epsdt_family_plan CHAR(1), -- EPSDT indicator
     rendering_provider_id_qualifier VARCHAR(2),
     rendering_provider_id VARCHAR(20),
-    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(claim_id, line_number)
-);
-COMMENT ON TABLE staging.cms1500_line_items IS 'Staging for CMS 1500 line items (Sections 24A-J).';
+    estimated_reimbursement_amount DECIMAL(10,2), -- Added for RVU calculations
+    reimbursement_calculation_status VARCHAR(20), -- Status of reimbursement calc
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) PARTITION BY RANGE (service_date);
+COMMENT ON TABLE staging.cms1500_line_items IS 'Staging for CMS 1500 line items (Sections 24A-J). Partitioned by service_date.';
+
+-- Create corresponding line items partitions
+DO $$
+DECLARE
+    start_date DATE := DATE_TRUNC('month', CURRENT_DATE - INTERVAL '6 months');
+    end_date DATE := DATE_TRUNC('month', CURRENT_DATE + INTERVAL '18 months');
+    partition_start DATE;
+    partition_end DATE;
+    partition_name TEXT;
+BEGIN
+    WHILE start_date < end_date LOOP
+        partition_start := start_date;
+        partition_end := start_date + INTERVAL '1 month';
+        partition_name := 'cms1500_line_items_' || TO_CHAR(partition_start, 'YYYY_MM');
+        
+        EXECUTE format('CREATE TABLE IF NOT EXISTS staging.%I PARTITION OF staging.cms1500_line_items
+                       FOR VALUES FROM (%L) TO (%L)', 
+                       partition_name, partition_start, partition_end);
+        
+        start_date := partition_end;
+    END LOOP;
+END $$;
 
 -- Legacy diagnosis and procedure tables (if still needed for backward compatibility during transition)
--- Consider migrating data from these to cms1500_diagnoses and cms1500_line_items if they represent the same data.
 CREATE TABLE staging.diagnoses (
     diagnosis_id SERIAL PRIMARY KEY,
-    claim_id VARCHAR(50) REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    claim_id VARCHAR(50),
     diagnosis_sequence INTEGER,
     diagnosis_code VARCHAR(20), -- Generic diagnosis code
     diagnosis_type VARCHAR(20), -- e.g., ICD9, ICD10
@@ -311,7 +388,7 @@ COMMENT ON TABLE staging.diagnoses IS 'Legacy staging for diagnosis codes; prefe
 
 CREATE TABLE staging.procedures (
     procedure_id SERIAL PRIMARY KEY,
-    claim_id VARCHAR(50) REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    claim_id VARCHAR(50),
     procedure_sequence INTEGER,
     procedure_code VARCHAR(20), -- Generic procedure code
     procedure_type VARCHAR(20), -- e.g., CPT, HCPCS
@@ -323,11 +400,11 @@ CREATE TABLE staging.procedures (
 );
 COMMENT ON TABLE staging.procedures IS 'Legacy staging for procedure codes; prefer cms1500_line_items.';
 
-
--- Validation results table
+-- Validation results table with partitioning by created_date
 CREATE TABLE staging.validation_results (
-    result_id BIGSERIAL PRIMARY KEY,
-    claim_id VARCHAR(50) NOT NULL REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    result_id BIGSERIAL,
+    claim_id VARCHAR(50) NOT NULL,
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL, -- Added NOT NULL for partitioning
     validation_type VARCHAR(50), -- 'FACILITY', 'MEDICAL', 'BUSINESS_RULES', 'ML_FILTER', 'DATALOG_RULE'
     validation_status VARCHAR(20) NOT NULL, -- 'PENDING', 'PASSED', 'FAILED', 'WARNING'
     validation_details JSONB, -- Detailed results, rule outcomes
@@ -338,15 +415,34 @@ CREATE TABLE staging.validation_results (
     error_message TEXT,
     facility_validation_details JSONB, -- Specific facility validation results
     model_version VARCHAR(50), -- Version of ML model used
-    rule_version VARCHAR(50), -- Version of Datalog/Validation rule used
-    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-COMMENT ON TABLE staging.validation_results IS 'Stores results of claim validation, including ML and rule outcomes.';
-COMMENT ON COLUMN staging.validation_results.rule_version IS 'Version of the Datalog rule or other validation rule used.';
+    rule_version VARCHAR(50) -- Version of Datalog/Validation rule used
+) PARTITION BY RANGE (created_date);
+COMMENT ON TABLE staging.validation_results IS 'Stores results of claim validation, including ML and rule outcomes. Partitioned by created_date.';
+
+-- Create validation results partitions (weekly partitions for finer granularity)
+DO $$
+DECLARE
+    start_date DATE := DATE_TRUNC('week', CURRENT_DATE - INTERVAL '4 weeks');
+    end_date DATE := DATE_TRUNC('week', CURRENT_DATE + INTERVAL '12 weeks');
+    partition_start DATE;
+    partition_end DATE;
+    partition_name TEXT;
+BEGIN
+    WHILE start_date < end_date LOOP
+        partition_start := start_date;
+        partition_end := start_date + INTERVAL '1 week';
+        partition_name := 'validation_results_' || TO_CHAR(partition_start, 'YYYY_WW');
+        
+        EXECUTE format('CREATE TABLE IF NOT EXISTS staging.%I PARTITION OF staging.validation_results
+                       FOR VALUES FROM (%L) TO (%L)', 
+                       partition_name, partition_start, partition_end);
+        
+        start_date := partition_end;
+    END LOOP;
+END $$;
 
 -- ===========================
--- REFERENCE DATA CACHE TABLES (STAGING SCHEMA)
--- These tables cache reference data from SQL Server (or edi.* master tables) for validation purposes
+-- REFERENCE DATA CACHE TABLES (STAGING SCHEMA) WITH MEMORY OPTIMIZATION
 -- ===========================
 
 CREATE TABLE staging.facilities_cache (
@@ -358,7 +454,7 @@ CREATE TABLE staging.facilities_cache (
     region_id INTEGER,       -- references edi.regions
     active BOOLEAN,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+) WITH (fillfactor = 90); -- Optimize for mostly read operations
 COMMENT ON TABLE staging.facilities_cache IS 'Read-only cache of facility data from SQL Server or edi.facilities for validation.';
 
 CREATE TABLE staging.departments_cache (
@@ -373,7 +469,7 @@ CREATE TABLE staging.departments_cache (
     is_critical_care BOOLEAN,
     active BOOLEAN,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+) WITH (fillfactor = 90);
 COMMENT ON TABLE staging.departments_cache IS 'Read-only cache of department data for validation.';
 
 CREATE TABLE staging.financial_classes_cache (
@@ -385,7 +481,7 @@ CREATE TABLE staging.financial_classes_cache (
     requires_authorization BOOLEAN,
     active BOOLEAN,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+) WITH (fillfactor = 90);
 COMMENT ON TABLE staging.financial_classes_cache IS 'Read-only cache of financial class data for validation.';
 
 CREATE TABLE staging.standard_payers_cache (
@@ -395,7 +491,7 @@ CREATE TABLE staging.standard_payers_cache (
     payer_category VARCHAR(50),
     active BOOLEAN,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+) WITH (fillfactor = 95); -- Very stable data
 COMMENT ON TABLE staging.standard_payers_cache IS 'Read-only cache of standard payer data for validation.';
 
 -- ===========================
@@ -413,16 +509,17 @@ CREATE TABLE staging.processing_batches (
     start_time TIMESTAMP,
     end_time TIMESTAMP,
     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    exported_to_production BOOLEAN DEFAULT FALSE
+    exported_to_production BOOLEAN DEFAULT FALSE,
+    processing_stats JSONB -- Additional processing statistics
 );
 COMMENT ON TABLE staging.processing_batches IS 'Tracks batches of claims being processed.';
 
 CREATE TABLE staging.claim_batches (
-    claim_id VARCHAR(50) REFERENCES staging.claims(claim_id) ON DELETE CASCADE,
+    claim_id VARCHAR(50),
     batch_id INTEGER REFERENCES staging.processing_batches(batch_id) ON DELETE CASCADE,
     assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (claim_id, batch_id)
-);
+) WITH (fillfactor = 95); -- Mostly INSERT operations
 COMMENT ON TABLE staging.claim_batches IS 'Assigns claims to processing batches.';
 
 CREATE TABLE staging.processing_errors (
@@ -471,59 +568,294 @@ CREATE TABLE edi.retry_queue (
 );
 COMMENT ON TABLE edi.retry_queue IS 'Queue for chunks that failed processing and need retrying.';
 
+-- ===========================
+-- ADVANCED INDEXES FOR HIGH-VOLUME QUERIES
+-- ===========================
+
+-- edi schema indexes with query optimization
+CREATE INDEX CONCURRENTLY idx_organizations_active_name ON edi.organizations(active, organization_name) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_regions_active_code ON edi.regions(active, region_code) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_facilities_active_lookup ON edi.facilities(facility_id, active, organization_id) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_facilities_state_type ON edi.facilities(state_code, facility_type) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_financial_classes_facility_active ON edi.financial_classes(facility_id, active) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_clinical_departments_facility_active ON edi.clinical_departments(facility_id, active) WHERE active = TRUE;
+
+-- Advanced filter index for active latest rules
+CREATE INDEX CONCURRENTLY idx_edi_filters_optimized ON edi.filters(filter_name, rule_type) 
+    WHERE is_active = TRUE AND is_latest_version = TRUE;
+
+-- Staging claims advanced indexes with partial and composite strategies
+CREATE INDEX CONCURRENTLY idx_staging_claims_processing_status_date ON staging.claims(processing_status, service_date, facility_id) 
+    WHERE exported_to_production = FALSE;
+
+CREATE INDEX CONCURRENTLY idx_staging_claims_facility_validation ON staging.claims(facility_id, facility_validated, processing_status)
+    WHERE exported_to_production = FALSE;
+
+CREATE INDEX CONCURRENTLY idx_staging_claims_export_ready ON staging.claims(exported_to_production, processing_status, service_date)
+    WHERE processing_status IN ('COMPLETED', 'VALIDATED');
+
+-- Hash index for fast claim lookups
+CREATE INDEX CONCURRENTLY idx_staging_claims_hash_lookup ON staging.claims USING HASH(hash_key);
+
+-- GIN index for JSONB fields
+CREATE INDEX CONCURRENTLY idx_staging_claims_claim_data_gin ON staging.claims USING GIN(claim_data);
+CREATE INDEX CONCURRENTLY idx_staging_claims_datalog_outcomes_gin ON staging.claims USING GIN(datalog_rule_outcomes);
+
+-- Full-text search index
+CREATE INDEX CONCURRENTLY idx_staging_claims_search_vector ON staging.claims USING GIN(search_vector);
+
+-- Multi-column indexes for common query patterns
+CREATE INDEX CONCURRENTLY idx_staging_claims_multi_validation ON staging.claims(facility_validated, department_validated, financial_class_validated, processing_status);
+
+-- Diagnosis and line item optimized indexes
+CREATE INDEX CONCURRENTLY idx_cms1500_diagnoses_claim_service ON staging.cms1500_diagnoses(claim_id, service_date, icd_code);
+CREATE INDEX CONCURRENTLY idx_cms1500_diagnoses_icd_primary ON staging.cms1500_diagnoses(icd_code, is_primary) WHERE is_primary = TRUE;
+
+CREATE INDEX CONCURRENTLY idx_cms1500_line_items_claim_service ON staging.cms1500_line_items(claim_id, service_date, cpt_code);
+CREATE INDEX CONCURRENTLY idx_cms1500_line_items_cpt_charges ON staging.cms1500_line_items(cpt_code, line_charge_amount);
+CREATE INDEX CONCURRENTLY idx_cms1500_line_items_reimbursement ON staging.cms1500_line_items(estimated_reimbursement_amount) 
+    WHERE estimated_reimbursement_amount IS NOT NULL;
+
+-- Validation results optimized indexes
+CREATE INDEX CONCURRENTLY idx_validation_results_claim_type_status ON staging.validation_results(claim_id, validation_type, validation_status);
+CREATE INDEX CONCURRENTLY idx_validation_results_performance ON staging.validation_results(validation_type, processing_time, created_date);
+CREATE INDEX CONCURRENTLY idx_validation_results_ml_stats ON staging.validation_results(model_version, ml_inference_time) 
+    WHERE ml_inference_time IS NOT NULL;
+
+-- Cache table indexes optimized for lookup patterns
+CREATE INDEX CONCURRENTLY idx_facilities_cache_active_lookup ON staging.facilities_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_departments_cache_facility_active ON staging.departments_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_financial_classes_cache_facility_active ON staging.financial_classes_cache(facility_id, active) WHERE active = TRUE;
+CREATE INDEX CONCURRENTLY idx_standard_payers_cache_code_active ON staging.standard_payers_cache(standard_payer_code, active) WHERE active = TRUE;
+
+-- Processing tracking indexes with performance focus
+CREATE INDEX CONCURRENTLY idx_processing_batches_status_date ON staging.processing_batches(status, created_date);
+CREATE INDEX CONCURRENTLY idx_claim_batches_batch_assigned ON staging.claim_batches(batch_id, assigned_date);
+CREATE INDEX CONCURRENTLY idx_processing_errors_claim_date ON staging.processing_errors(claim_id, created_date);
+CREATE INDEX CONCURRENTLY idx_processing_errors_type_date ON staging.processing_errors(error_type, created_date);
 
 -- ===========================
--- INDEXES FOR PERFORMANCE
+-- MATERIALIZED VIEWS FOR ANALYTICS
 -- ===========================
 
--- edi schema indexes
-CREATE INDEX idx_organizations_active ON edi.organizations(active);
-CREATE INDEX idx_regions_active ON edi.regions(active);
-CREATE INDEX idx_facilities_organization_id ON edi.facilities(organization_id);
-CREATE INDEX idx_facilities_active ON edi.facilities(active);
-CREATE INDEX idx_standard_payers_active ON edi.standard_payers(active);
-CREATE INDEX idx_financial_classes_facility_id ON edi.financial_classes(facility_id);
-CREATE INDEX idx_clinical_departments_facility_id ON edi.clinical_departments(facility_id);
-CREATE INDEX idx_edi_filters_active_type_latest ON edi.filters(filter_name, is_active, is_latest_version, rule_type);
+-- High-level processing statistics materialized view
+CREATE MATERIALIZED VIEW analytics.processing_summary AS
+SELECT
+    DATE_TRUNC('hour', created_date) as processing_hour,
+    processing_status,
+    facility_validated,
+    department_validated,
+    financial_class_validated,
+    COUNT(*) as claim_count,
+    SUM(total_charge_amount) as total_charges,
+    AVG(total_charge_amount) as avg_charge_amount,
+    COUNT(*) FILTER (WHERE exported_to_production = TRUE) as exported_count,
+    MIN(service_date) as earliest_service_date,
+    MAX(service_date) as latest_service_date
+FROM staging.claims
+WHERE created_date >= CURRENT_DATE - INTERVAL '7 days'
+GROUP BY DATE_TRUNC('hour', created_date), processing_status, facility_validated, department_validated, financial_class_validated;
 
+CREATE UNIQUE INDEX idx_processing_summary_unique ON analytics.processing_summary(processing_hour, processing_status, facility_validated, department_validated, financial_class_validated);
+COMMENT ON MATERIALIZED VIEW analytics.processing_summary IS 'Hourly aggregated processing statistics for analytics dashboard.';
 
--- staging.claims indexes
-CREATE INDEX idx_staging_claims_facility_id ON staging.claims(facility_id);
-CREATE INDEX idx_staging_claims_department_id ON staging.claims(department_id);
-CREATE INDEX idx_staging_claims_financial_class_id ON staging.claims(financial_class_id);
-CREATE INDEX idx_staging_claims_processing_status ON staging.claims(processing_status);
-CREATE INDEX idx_staging_claims_service_date ON staging.claims(service_date);
-CREATE INDEX idx_staging_claims_exported ON staging.claims(exported_to_production);
-CREATE INDEX idx_staging_claims_validation_status ON staging.claims(facility_validated, department_validated, financial_class_validated);
+-- Facility performance analytics
+CREATE MATERIALIZED VIEW analytics.facility_performance AS
+SELECT
+    f.facility_id,
+    f.facility_name,
+    f.facility_type,
+    f.state_code,
+    DATE_TRUNC('day', c.service_date) as service_day,
+    COUNT(c.claim_id) as total_claims,
+    COUNT(*) FILTER (WHERE c.processing_status = 'COMPLETED') as completed_claims,
+    COUNT(*) FILTER (WHERE c.facility_validated = TRUE) as facility_validated_claims,
+    COUNT(*) FILTER (WHERE c.exported_to_production = TRUE) as exported_claims,
+    SUM(c.total_charge_amount) as total_charges,
+    AVG(c.total_charge_amount) as avg_charge_per_claim,
+    COUNT(DISTINCT c.patient_id) as unique_patients,
+    COUNT(DISTINCT li.cpt_code) as unique_procedures
+FROM staging.claims c
+JOIN staging.facilities_cache f ON c.facility_id = f.facility_id
+LEFT JOIN staging.cms1500_line_items li ON c.claim_id = li.claim_id AND c.service_date = li.service_date
+WHERE c.service_date >= CURRENT_DATE - INTERVAL '30 days'
+GROUP BY f.facility_id, f.facility_name, f.facility_type, f.state_code, DATE_TRUNC('day', c.service_date);
 
--- staging.cms1500_diagnoses and staging.cms1500_line_items indexes
-CREATE INDEX idx_staging_cms1500_diagnoses_claim_id ON staging.cms1500_diagnoses(claim_id);
-CREATE INDEX idx_staging_cms1500_diagnoses_icd_code ON staging.cms1500_diagnoses(icd_code);
-CREATE INDEX idx_staging_cms1500_line_items_claim_id ON staging.cms1500_line_items(claim_id);
-CREATE INDEX idx_staging_cms1500_line_items_cpt_code ON staging.cms1500_line_items(cpt_code);
+CREATE UNIQUE INDEX idx_facility_performance_unique ON analytics.facility_performance(facility_id, service_day);
+COMMENT ON MATERIALIZED VIEW analytics.facility_performance IS 'Daily facility performance metrics for analytics and reporting.';
 
--- staging.validation_results indexes
-CREATE INDEX idx_staging_validation_results_claim_id ON staging.validation_results(claim_id);
-CREATE INDEX idx_staging_validation_results_type_status ON staging.validation_results(validation_type, validation_status);
-CREATE INDEX idx_staging_validation_results_created_date ON staging.validation_results(created_date);
+-- Validation failure patterns analysis
+CREATE MATERIALIZED VIEW analytics.validation_failure_patterns AS
+SELECT
+    vr.validation_type,
+    vr.validation_status,
+    vr.model_version,
+    DATE_TRUNC('day', vr.created_date) as validation_day,
+    COUNT(*) as failure_count,
+    AVG(vr.processing_time) as avg_processing_time,
+    AVG(vr.ml_inference_time) as avg_ml_inference_time,
+    AVG(vr.rule_engine_time) as avg_rule_engine_time,
+    -- Extract common error patterns from validation_details JSONB
+    jsonb_object_agg(
+        COALESCE(vr.validation_details->>'error_type', 'unknown'),
+        COUNT(*)
+    ) FILTER (WHERE vr.validation_status = 'FAILED') as error_type_counts
+FROM staging.validation_results vr
+WHERE vr.created_date >= CURRENT_DATE - INTERVAL '7 days'
+GROUP BY vr.validation_type, vr.validation_status, vr.model_version, DATE_TRUNC('day', vr.created_date);
 
--- Reference cache indexes
-CREATE INDEX idx_staging_facilities_cache_active ON staging.facilities_cache(active);
-CREATE INDEX idx_staging_departments_cache_facility ON staging.departments_cache(facility_id);
-CREATE INDEX idx_staging_financial_classes_cache_facility ON staging.financial_classes_cache(facility_id);
+CREATE UNIQUE INDEX idx_validation_failure_patterns_unique ON analytics.validation_failure_patterns(validation_type, validation_status, model_version, validation_day);
+COMMENT ON MATERIALIZED VIEW analytics.validation_failure_patterns IS 'Daily validation failure pattern analysis for troubleshooting.';
 
--- Processing tracking indexes
-CREATE INDEX idx_staging_processing_batches_status ON staging.processing_batches(status);
-CREATE INDEX idx_staging_claim_batches_batch_id ON staging.claim_batches(batch_id);
-CREATE INDEX idx_staging_processing_errors_claim_id ON staging.processing_errors(claim_id);
+-- Financial metrics materialized view
+CREATE MATERIALIZED VIEW analytics.financial_metrics AS
+SELECT
+    DATE_TRUNC('day', c.service_date) as service_day,
+    fc.financial_class_description,
+    sp.payer_category,
+    f.facility_type,
+    f.state_code,
+    COUNT(c.claim_id) as claim_count,
+    SUM(c.total_charge_amount) as total_charges,
+    SUM(li.estimated_reimbursement_amount) as total_estimated_reimbursement,
+    AVG(c.total_charge_amount) as avg_charge_per_claim,
+    AVG(li.estimated_reimbursement_amount) as avg_reimbursement_per_line,
+    -- Calculate reimbursement ratio where both values exist
+    CASE 
+        WHEN SUM(c.total_charge_amount) > 0 
+        THEN SUM(li.estimated_reimbursement_amount) / SUM(c.total_charge_amount)
+        ELSE NULL
+    END as reimbursement_ratio
+FROM staging.claims c
+JOIN staging.facilities_cache f ON c.facility_id = f.facility_id
+LEFT JOIN staging.financial_classes_cache fc ON c.financial_class_id = fc.financial_class_id
+LEFT JOIN staging.standard_payers_cache sp ON fc.standard_payer_id = sp.standard_payer_id
+LEFT JOIN staging.cms1500_line_items li ON c.claim_id = li.claim_id AND c.service_date = li.service_date
+WHERE c.service_date >= CURRENT_DATE - INTERVAL '90 days'
+  AND c.exported_to_production = TRUE
+GROUP BY DATE_TRUNC('day', c.service_date), fc.financial_class_description, sp.payer_category, f.facility_type, f.state_code;
 
+CREATE UNIQUE INDEX idx_financial_metrics_unique ON analytics.financial_metrics(service_day, financial_class_description, payer_category, facility_type, state_code);
+COMMENT ON MATERIALIZED VIEW analytics.financial_metrics IS 'Daily financial performance metrics including reimbursement analysis.';
+
+-- ML Model performance tracking
+CREATE MATERIALIZED VIEW analytics.ml_model_performance AS
+SELECT
+    vr.model_version,
+    DATE_TRUNC('hour', vr.created_date) as prediction_hour,
+    COUNT(*) as total_predictions,
+    AVG(vr.ml_inference_time) as avg_inference_time,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vr.ml_inference_time) as median_inference_time,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY vr.ml_inference_time) as p95_inference_time,
+    -- Extract prediction confidence if stored in validation_details
+    AVG((vr.validation_details->>'confidence')::FLOAT) FILTER (WHERE vr.validation_details->>'confidence' IS NOT NULL) as avg_confidence,
+    COUNT(*) FILTER (WHERE (vr.validation_details->>'confidence')::FLOAT > 0.8) as high_confidence_predictions
+FROM staging.validation_results vr
+WHERE vr.validation_type = 'ML_FILTER'
+  AND vr.created_date >= CURRENT_DATE - INTERVAL '24 hours'
+  AND vr.ml_inference_time IS NOT NULL
+GROUP BY vr.model_version, DATE_TRUNC('hour', vr.created_date);
+
+CREATE UNIQUE INDEX idx_ml_model_performance_unique ON analytics.ml_model_performance(model_version, prediction_hour);
+COMMENT ON MATERIALIZED VIEW analytics.ml_model_performance IS 'Hourly ML model performance metrics for monitoring.';
 
 -- ===========================
--- VIEWS FOR PROCESSING (STAGING SCHEMA)
+-- PERFORMANCE OPTIMIZATION FUNCTIONS
+-- ===========================
+
+-- Function to refresh all materialized views
+CREATE OR REPLACE FUNCTION analytics.refresh_all_views()
+RETURNS TEXT AS $
+DECLARE
+    view_name TEXT;
+    result_text TEXT := '';
+    start_time TIMESTAMP;
+    end_time TIMESTAMP;
+BEGIN
+    FOR view_name IN 
+        SELECT schemaname||'.'||matviewname 
+        FROM pg_matviews 
+        WHERE schemaname = 'analytics'
+        ORDER BY matviewname
+    LOOP
+        start_time := clock_timestamp();
+        EXECUTE 'REFRESH MATERIALIZED VIEW CONCURRENTLY ' || view_name;
+        end_time := clock_timestamp();
+        result_text := result_text || view_name || ' refreshed in ' || 
+                      EXTRACT(EPOCH FROM (end_time - start_time))::TEXT || ' seconds. ';
+    END LOOP;
+    
+    RETURN result_text;
+END;
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION analytics.refresh_all_views() IS 'Refreshes all materialized views in the analytics schema.';
+
+-- Function to update search vectors for full-text search
+CREATE OR REPLACE FUNCTION staging.update_claim_search_vectors()
+RETURNS INTEGER AS $
+DECLARE
+    updated_count INTEGER;
+BEGIN
+    UPDATE staging.claims
+    SET search_vector = to_tsvector('english', 
+        COALESCE(claim_id, '') || ' ' ||
+        COALESCE(patient_account_number, '') || ' ' ||
+        COALESCE(facility_id, '') || ' ' ||
+        COALESCE(payer_name, '') || ' ' ||
+        COALESCE(provider_id, '')
+    )
+    WHERE search_vector IS NULL
+       OR updated_date > CURRENT_TIMESTAMP - INTERVAL '1 hour';
+    
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    RETURN updated_count;
+END;
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION staging.update_claim_search_vectors() IS 'Updates search vectors for recently modified claims.';
+
+-- Function for intelligent partition management
+CREATE OR REPLACE FUNCTION staging.manage_partitions()
+RETURNS TEXT AS $
+DECLARE
+    table_name TEXT;
+    future_partitions INTEGER := 0;
+    old_partitions INTEGER := 0;
+    result_text TEXT := '';
+BEGIN
+    -- Create future partitions for claims (6 months ahead)
+    FOR table_name IN VALUES ('claims'), ('cms1500_diagnoses'), ('cms1500_line_items') LOOP
+        EXECUTE format('
+            INSERT INTO staging.partition_log (table_name, action, partition_date)
+            SELECT %L, ''CREATE_FUTURE'', generate_series(
+                DATE_TRUNC(''month'', CURRENT_DATE + INTERVAL ''1 month''),
+                DATE_TRUNC(''month'', CURRENT_DATE + INTERVAL ''6 months''),
+                INTERVAL ''1 month''
+            )::DATE
+            ON CONFLICT DO NOTHING', table_name);
+    END LOOP;
+    
+    -- Create weekly partitions for validation_results (8 weeks ahead)
+    EXECUTE '
+        CREATE TABLE IF NOT EXISTS staging.partition_log (
+            table_name TEXT,
+            action TEXT,
+            partition_date DATE,
+            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (table_name, action, partition_date)
+        )';
+    
+    result_text := 'Partition management completed. Future partitions scheduled.';
+    RETURN result_text;
+END;
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION staging.manage_partitions() IS 'Manages partition creation and cleanup automatically.';
+
+-- ===========================
+-- VIEWS FOR PROCESSING WITH QUERY OPTIMIZATION HINTS
 -- ===========================
 
 CREATE OR REPLACE VIEW staging.v_claims_for_validation AS
-SELECT
+SELECT /*+ USE_HASH(c fac_cache) USE_HASH(c dept_cache) USE_HASH(c fin_cache) */
     c.claim_id,
     c.facility_id,
     c.department_id,
@@ -544,319 +876,176 @@ SELECT
     c.processing_status,
     c.claim_data,
     c.created_date,
+    c.hash_key,
     COALESCE(fac_cache.facility_name, 'N/A') as facility_name,
     COALESCE(dept_cache.department_description, 'N/A') as department_description,
     COALESCE(fin_cache.financial_class_description, 'N/A') as financial_class_description,
     COALESCE(array_agg(DISTINCT diag.icd_code) FILTER (WHERE diag.icd_code IS NOT NULL), ARRAY[]::VARCHAR[]) as diagnosis_codes,
     COALESCE(array_agg(DISTINCT li.cpt_code) FILTER (WHERE li.cpt_code IS NOT NULL), ARRAY[]::VARCHAR[]) as procedure_codes,
     COUNT(DISTINCT diag.diagnosis_entry_id) as diagnosis_count,
-    COUNT(DISTINCT li.line_item_id) as line_item_count
+    COUNT(DISTINCT li.line_item_id) as line_item_count,
+    SUM(li.estimated_reimbursement_amount) as total_estimated_reimbursement
 FROM staging.claims c
 LEFT JOIN staging.facilities_cache fac_cache ON c.facility_id = fac_cache.facility_id
 LEFT JOIN staging.departments_cache dept_cache ON c.department_id = dept_cache.department_id
 LEFT JOIN staging.financial_classes_cache fin_cache ON c.financial_class_id = fin_cache.financial_class_id
-LEFT JOIN staging.cms1500_diagnoses diag ON c.claim_id = diag.claim_id
-LEFT JOIN staging.cms1500_line_items li ON c.claim_id = li.claim_id
+LEFT JOIN staging.cms1500_diagnoses diag ON c.claim_id = diag.claim_id AND c.service_date = diag.service_date
+LEFT JOIN staging.cms1500_line_items li ON c.claim_id = li.claim_id AND c.service_date = li.service_date
 WHERE c.processing_status = 'PENDING'
   AND c.exported_to_production = FALSE
-GROUP BY c.claim_id, fac_cache.facility_name, dept_cache.department_description, fin_cache.financial_class_description;
-COMMENT ON VIEW staging.v_claims_for_validation IS 'View for claims ready for validation, joining with cached reference data.';
+GROUP BY c.claim_id, c.facility_id, c.department_id, c.financial_class_id, c.patient_id, 
+         c.patient_age, c.patient_dob, c.patient_sex, c.patient_account_number, c.provider_id, 
+         c.provider_type, c.rendering_provider_npi, c.place_of_service, c.service_date, 
+         c.total_charge_amount, c.total_claim_charges, c.payer_name, c.processing_status, 
+         c.claim_data, c.created_date, c.hash_key, fac_cache.facility_name, 
+         dept_cache.department_description, fin_cache.financial_class_description;
+COMMENT ON VIEW staging.v_claims_for_validation IS 'Optimized view for claims ready for validation with enhanced performance hints.';
 
-CREATE OR REPLACE VIEW staging.v_facility_validation_status AS
-SELECT
-    c.claim_id,
-    c.facility_id,
-    c.department_id,
-    c.financial_class_id,
-    fac_cache.facility_name,
-    fac_cache.active as facility_active,
-    dept_cache.department_description,
-    dept_cache.active as department_active,
-    dept_cache.facility_id as department_facility_id, -- Facility ID from the department's own record
-    fin_cache.financial_class_description,
-    fin_cache.active as financial_class_active,
-    fin_cache.facility_id as financial_class_facility_id, -- Facility ID from the financial class's own record
-    CASE
-        WHEN c.facility_id IS NULL THEN 'No facility assigned'
-        WHEN fac_cache.facility_id IS NULL THEN 'Facility not found in cache'
-        WHEN fac_cache.active = FALSE THEN 'Facility inactive in cache'
-        ELSE 'Valid'
-    END as facility_status,
-    CASE
-        WHEN c.department_id IS NOT NULL AND dept_cache.department_id IS NULL THEN 'Department not found in cache'
-        WHEN c.department_id IS NOT NULL AND dept_cache.active = FALSE THEN 'Department inactive in cache'
-        WHEN c.department_id IS NOT NULL AND dept_cache.facility_id != c.facility_id THEN 'Department facility mismatch'
-        ELSE 'Valid'
-    END as department_status,
-    CASE
-        WHEN c.financial_class_id IS NOT NULL AND fin_cache.financial_class_id IS NULL THEN 'Financial class not found in cache'
-        WHEN c.financial_class_id IS NOT NULL AND fin_cache.active = FALSE THEN 'Financial class inactive in cache'
-        WHEN c.financial_class_id IS NOT NULL AND fin_cache.facility_id != c.facility_id THEN 'Financial class facility mismatch'
-        ELSE 'Valid'
-    END as financial_class_status
-FROM staging.claims c
-LEFT JOIN staging.facilities_cache fac_cache ON c.facility_id = fac_cache.facility_id
-LEFT JOIN staging.departments_cache dept_cache ON c.department_id = dept_cache.department_id
-LEFT JOIN staging.financial_classes_cache fin_cache ON c.financial_class_id = fin_cache.financial_class_id;
-COMMENT ON VIEW staging.v_facility_validation_status IS 'View for checking the validation status of facility, department, and financial class assignments on claims against cached reference data.';
-
-CREATE OR REPLACE VIEW staging.v_processing_statistics AS
-SELECT
-    COUNT(*) as total_claims,
-    COUNT(*) FILTER (WHERE processing_status = 'PENDING') as pending_claims,
-    COUNT(*) FILTER (WHERE processing_status = 'PROCESSING') as processing_claims,
-    COUNT(*) FILTER (WHERE processing_status = 'COMPLETED') as completed_claims,
-    COUNT(*) FILTER (WHERE processing_status = 'ERROR') as error_claims,
-    COUNT(*) FILTER (WHERE exported_to_production = TRUE) as exported_claims,
-    COUNT(*) FILTER (WHERE facility_validated = TRUE) as facility_validated_claims,
-    COUNT(*) FILTER (WHERE department_validated = TRUE) as department_validated_claims,
-    COUNT(*) FILTER (WHERE financial_class_validated = TRUE) as financial_class_validated_claims,
-    MIN(service_date) as earliest_service_date,
-    MAX(service_date) as latest_service_date,
+CREATE OR REPLACE VIEW staging.v_high_volume_processing_stats AS
+SELECT /*+ PARALLEL(4) */
+    DATE_TRUNC('hour', created_date) as processing_hour,
+    processing_status,
+    COUNT(*) as claim_count,
+    COUNT(*) FILTER (WHERE facility_validated = TRUE) as facility_validated_count,
+    COUNT(*) FILTER (WHERE exported_to_production = TRUE) as exported_count,
     SUM(total_charge_amount) as total_charges,
-    AVG(total_charge_amount) as avg_charge_amount
-FROM staging.claims;
-COMMENT ON VIEW staging.v_processing_statistics IS 'Aggregated statistics about the claims in the staging table.';
+    AVG(total_charge_amount) as avg_charge,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_charge_amount) as median_charge,
+    COUNT(DISTINCT facility_id) as unique_facilities,
+    COUNT(DISTINCT SUBSTRING(patient_account_number, 1, 3)) as account_prefixes -- Privacy-safe patient diversity metric
+FROM staging.claims
+WHERE created_date >= CURRENT_DATE - INTERVAL '24 hours'
+GROUP BY DATE_TRUNC('hour', created_date), processing_status
+ORDER BY processing_hour DESC;
+COMMENT ON VIEW staging.v_high_volume_processing_stats IS 'High-performance hourly processing statistics with parallel processing hints.';
 
 -- ===========================
--- FUNCTIONS FOR STAGING OPERATIONS
+-- TRIGGERS FOR AUTOMATIC UPDATES WITH PERFORMANCE OPTIMIZATION
 -- ===========================
 
-CREATE OR REPLACE FUNCTION staging.refresh_reference_cache()
-RETURNS TEXT AS $$
-DECLARE
-    refresh_count INTEGER;
-    result_message TEXT := '';
+CREATE OR REPLACE FUNCTION staging.update_claims_timestamp_optimized()
+RETURNS TRIGGER AS $
 BEGIN
-    -- This function is a placeholder. The actual synchronization logic
-    -- (fetching from SQL Server or edi.* master tables and inserting into staging.*_cache tables)
-    -- should be handled by the application layer (e.g., in StagingPostgreSQLHandler).
-    -- This function can be called by the application after it has performed the sync.
-
-    UPDATE staging.facilities_cache SET last_updated = CURRENT_TIMESTAMP;
-    GET DIAGNOSTICS refresh_count = ROW_COUNT;
-    result_message := result_message || 'Facilities cache: ' || refresh_count || ' rows marked as refreshed. ';
-
-    UPDATE staging.departments_cache SET last_updated = CURRENT_TIMESTAMP;
-    GET DIAGNOSTICS refresh_count = ROW_COUNT;
-    result_message := result_message || 'Departments cache: ' || refresh_count || ' rows marked as refreshed. ';
-
-    UPDATE staging.financial_classes_cache SET last_updated = CURRENT_TIMESTAMP;
-    GET DIAGNOSTICS refresh_count = ROW_COUNT;
-    result_message := result_message || 'Financial classes cache: ' || refresh_count || ' rows marked as refreshed. ';
-
-    UPDATE staging.standard_payers_cache SET last_updated = CURRENT_TIMESTAMP;
-    GET DIAGNOSTICS refresh_count = ROW_COUNT;
-    result_message := result_message || 'Standard payers cache: ' || refresh_count || ' rows marked as refreshed.';
-
-    RETURN result_message;
-END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.refresh_reference_cache() IS 'Placeholder function to mark reference caches as updated. Actual data sync is application-driven.';
-
-CREATE OR REPLACE FUNCTION staging.validate_claim_facility_assignments_func(p_claim_id VARCHAR(50))
-RETURNS TABLE(
-    claim_id_out VARCHAR(50),
-    validation_status_out VARCHAR(20),
-    errors_out TEXT[],
-    warnings_out TEXT[]
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        v.claim_id,
-        CASE
-            WHEN v.facility_status != 'Valid'
-                OR v.department_status != 'Valid'
-                OR v.financial_class_status != 'Valid'
-            THEN 'FAILED'
-            ELSE 'PASSED'
-        END as validation_status,
-        ARRAY_REMOVE(ARRAY[
-            CASE WHEN v.facility_status != 'Valid' THEN v.facility_status END,
-            CASE WHEN v.department_status != 'Valid' THEN v.department_status END,
-            CASE WHEN v.financial_class_status != 'Valid' THEN v.financial_class_status END
-        ], NULL) as errors,
-        ARRAY[]::TEXT[] as warnings -- Placeholder for warnings
-    FROM staging.v_facility_validation_status v
-    WHERE v.claim_id = p_claim_id;
-END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.validate_claim_facility_assignments_func(VARCHAR(50)) IS 'Validates facility, department, and financial class assignments for a single claim using the cache view.';
-
-
-CREATE OR REPLACE FUNCTION staging.mark_claims_validated(
-    p_claim_ids TEXT[],
-    p_facility_valid BOOLEAN DEFAULT TRUE,
-    p_department_valid BOOLEAN DEFAULT TRUE,
-    p_financial_class_valid BOOLEAN DEFAULT TRUE
-)
-RETURNS INTEGER AS $$
-DECLARE
-    updated_count INTEGER;
-BEGIN
-    UPDATE staging.claims
-    SET
-        facility_validated = p_facility_valid,
-        department_validated = p_department_valid,
-        financial_class_validated = p_financial_class_valid,
-        updated_date = CURRENT_TIMESTAMP
-    WHERE claim_id = ANY(p_claim_ids);
-    GET DIAGNOSTICS updated_count = ROW_COUNT;
-    RETURN updated_count;
-END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.mark_claims_validated(TEXT[], BOOLEAN, BOOLEAN, BOOLEAN) IS 'Marks specified claims with their facility validation statuses.';
-
-CREATE OR REPLACE FUNCTION staging.create_processing_batch(
-    p_batch_name VARCHAR(100),
-    p_claim_ids TEXT[] DEFAULT NULL
-)
-RETURNS INTEGER AS $$
-DECLARE
-    new_batch_id INTEGER;
-    claim_count INTEGER;
-BEGIN
-    INSERT INTO staging.processing_batches (batch_name, status, start_time)
-    VALUES (p_batch_name, 'PENDING', CURRENT_TIMESTAMP)
-    RETURNING batch_id INTO new_batch_id;
-
-    IF p_claim_ids IS NOT NULL THEN
-        INSERT INTO staging.claim_batches (claim_id, batch_id)
-        SELECT unnest(p_claim_ids), new_batch_id;
-        claim_count := array_length(p_claim_ids, 1);
-    ELSE
-        INSERT INTO staging.claim_batches (claim_id, batch_id)
-        SELECT c.claim_id, new_batch_id
-        FROM staging.claims c
-        WHERE c.processing_status = 'PENDING' AND c.exported_to_production = FALSE;
-        GET DIAGNOSTICS claim_count = ROW_COUNT;
+    -- Only update timestamp if substantive fields changed
+    IF (OLD.processing_status IS DISTINCT FROM NEW.processing_status OR
+        OLD.facility_validated IS DISTINCT FROM NEW.facility_validated OR
+        OLD.department_validated IS DISTINCT FROM NEW.department_validated OR
+        OLD.financial_class_validated IS DISTINCT FROM NEW.financial_class_validated OR
+        OLD.exported_to_production IS DISTINCT FROM NEW.exported_to_production) THEN
+        
+        NEW.updated_date = CURRENT_TIMESTAMP;
+        
+        -- Update search vector if key searchable fields changed
+        IF (OLD.patient_account_number IS DISTINCT FROM NEW.patient_account_number OR
+            OLD.facility_id IS DISTINCT FROM NEW.facility_id OR
+            OLD.payer_name IS DISTINCT FROM NEW.payer_name) THEN
+            
+            NEW.search_vector = to_tsvector('english', 
+                COALESCE(NEW.claim_id, '') || ' ' ||
+                COALESCE(NEW.patient_account_number, '') || ' ' ||
+                COALESCE(NEW.facility_id, '') || ' ' ||
+                COALESCE(NEW.payer_name, '') || ' ' ||
+                COALESCE(NEW.provider_id, '')
+            );
+        END IF;
     END IF;
-
-    UPDATE staging.processing_batches
-    SET total_claims = claim_count
-    WHERE batch_id = new_batch_id;
-
-    RETURN new_batch_id;
-END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.create_processing_batch(VARCHAR(100), TEXT[]) IS 'Creates a new processing batch and assigns claims to it.';
-
-CREATE OR REPLACE FUNCTION staging.get_claims_for_export(
-    p_limit INTEGER DEFAULT 1000
-)
-RETURNS TABLE(
-    r_claim_id VARCHAR(50),
-    r_facility_id VARCHAR(50),
-    r_department_id INTEGER,
-    r_financial_class_id VARCHAR(50), -- Changed from VARCHAR(20) to VARCHAR(50) to match staging.claims
-    r_validation_status VARCHAR(20)
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        c.claim_id,
-        c.facility_id,
-        c.department_id,
-        c.financial_class_id,
-        CASE
-            WHEN c.facility_validated = TRUE
-                AND c.department_validated = TRUE -- Assuming department_validated exists or logic is adjusted
-                AND c.financial_class_validated = TRUE -- Assuming financial_class_validated exists
-            THEN 'VALIDATED'
-            ELSE 'PENDING_VALIDATION'
-        END as validation_status
-    FROM staging.claims c
-    WHERE c.processing_status = 'COMPLETED' -- Or a status indicating it's ready for export post all processing
-      AND c.exported_to_production = FALSE
-      AND c.facility_validated = TRUE -- Ensure facility part is validated at least
-    ORDER BY c.updated_date
-    LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.get_claims_for_export(INTEGER) IS 'Retrieves claims that are validated and ready for export to the production system.';
-
--- ===========================
--- TRIGGERS FOR AUTOMATIC UPDATES (STAGING SCHEMA)
--- ===========================
-
-CREATE OR REPLACE FUNCTION staging.update_claims_timestamp()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_date = CURRENT_TIMESTAMP;
+    
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS tr_staging_claims_updated_date ON staging.claims;
 CREATE TRIGGER tr_staging_claims_updated_date
     BEFORE UPDATE ON staging.claims
     FOR EACH ROW
-    EXECUTE FUNCTION staging.update_claims_timestamp();
-COMMENT ON TRIGGER tr_staging_claims_updated_date ON staging.claims IS 'Automatically updates the updated_date on staging.claims modifications.';
-
-CREATE OR REPLACE FUNCTION staging.log_validation_changes()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF OLD.facility_validated IS DISTINCT FROM NEW.facility_validated
-       OR OLD.department_validated IS DISTINCT FROM NEW.department_validated
-       OR OLD.financial_class_validated IS DISTINCT FROM NEW.financial_class_validated THEN
-
-        INSERT INTO staging.validation_results (
-            claim_id, validation_type, validation_status, validation_details
-        ) VALUES (
-            NEW.claim_id,
-            'FACILITY_STRUCTURE_VALIDATION', -- More specific type
-            CASE
-                WHEN NEW.facility_validated = TRUE
-                    AND NEW.department_validated = TRUE
-                    AND NEW.financial_class_validated = TRUE
-                THEN 'PASSED'
-                ELSE 'FAILED'
-            END,
-            jsonb_build_object(
-                'facility_validated', NEW.facility_validated,
-                'department_validated', NEW.department_validated,
-                'financial_class_validated', NEW.financial_class_validated,
-                'validation_errors', NEW.validation_errors,
-                'validation_warnings', NEW.validation_warnings
-            )
-        );
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER tr_staging_claims_validation_log
-    AFTER UPDATE ON staging.claims
-    FOR EACH ROW
-    EXECUTE FUNCTION staging.log_validation_changes();
-COMMENT ON TRIGGER tr_staging_claims_validation_log ON staging.claims IS 'Logs changes to facility validation statuses into staging.validation_results.';
+    EXECUTE FUNCTION staging.update_claims_timestamp_optimized();
+COMMENT ON TRIGGER tr_staging_claims_updated_date ON staging.claims IS 'Optimized trigger for updating timestamps and search vectors.';
 
 -- ===========================
--- STORED PROCEDURES FOR BATCH OPERATIONS (STAGING SCHEMA)
+-- STORED PROCEDURES FOR HIGH-PERFORMANCE BATCH OPERATIONS
 -- ===========================
 
-CREATE OR REPLACE FUNCTION staging.cleanup_old_data(
-    p_days_to_keep INTEGER DEFAULT 30
+CREATE OR REPLACE FUNCTION staging.bulk_update_processing_status(
+    p_claim_ids TEXT[],
+    p_new_status VARCHAR(30),
+    p_batch_size INTEGER DEFAULT 1000
 )
-RETURNS TEXT AS $$
+RETURNS INTEGER AS $
+DECLARE
+    updated_count INTEGER := 0;
+    batch_start INTEGER := 1;
+    batch_end INTEGER;
+    total_claims INTEGER := array_length(p_claim_ids, 1);
+BEGIN
+    -- Process in batches to avoid long-running transactions
+    WHILE batch_start <= total_claims LOOP
+        batch_end := LEAST(batch_start + p_batch_size - 1, total_claims);
+        
+        UPDATE staging.claims
+        SET processing_status = p_new_status,
+            updated_date = CURRENT_TIMESTAMP
+        WHERE claim_id = ANY(p_claim_ids[batch_start:batch_end]);
+        
+        GET DIAGNOSTICS updated_count = updated_count + ROW_COUNT;
+        
+        -- Commit each batch
+        COMMIT;
+        
+        batch_start := batch_end + 1;
+    END LOOP;
+    
+    RETURN updated_count;
+END;
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION staging.bulk_update_processing_status(TEXT[], VARCHAR(30), INTEGER) IS 'High-performance bulk status updates with batching.';
+
+CREATE OR REPLACE FUNCTION staging.cleanup_old_data_optimized(
+    p_days_to_keep INTEGER DEFAULT 30,
+    p_batch_size INTEGER DEFAULT 10000
+)
+RETURNS TEXT AS $
 DECLARE
     deleted_claims INTEGER := 0;
     deleted_validations INTEGER := 0;
     deleted_batches INTEGER := 0;
+    batch_deleted INTEGER;
     result_message TEXT;
 BEGIN
-    -- Delete old exported claims and related data (cascading deletes handle diagnoses, line_items, claim_batches)
-    DELETE FROM staging.claims
-    WHERE exported_to_production = TRUE
-      AND export_date < (CURRENT_DATE - (p_days_to_keep || ' days')::interval);
-    GET DIAGNOSTICS deleted_claims = ROW_COUNT;
-
-    -- Delete old validation results for claims that no longer exist or are very old
-    DELETE FROM staging.validation_results vr
-    WHERE vr.created_date < (CURRENT_DATE - (p_days_to_keep || ' days')::interval)
-      AND NOT EXISTS (SELECT 1 FROM staging.claims c WHERE c.claim_id = vr.claim_id);
-    GET DIAGNOSTICS deleted_validations = ROW_COUNT;
+    -- Delete old exported claims in batches
+    LOOP
+        DELETE FROM staging.claims
+        WHERE ctid IN (
+            SELECT ctid FROM staging.claims
+            WHERE exported_to_production = TRUE
+              AND export_date < (CURRENT_DATE - (p_days_to_keep || ' days')::interval)
+            LIMIT p_batch_size
+        );
+        
+        GET DIAGNOSTICS batch_deleted = ROW_COUNT;
+        deleted_claims := deleted_claims + batch_deleted;
+        
+        EXIT WHEN batch_deleted = 0;
+        
+        -- Brief pause to allow other operations
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    
+    -- Delete old validation results in batches
+    LOOP
+        DELETE FROM staging.validation_results
+        WHERE ctid IN (
+            SELECT ctid FROM staging.validation_results vr
+            WHERE vr.created_date < (CURRENT_DATE - (p_days_to_keep || ' days')::interval)
+              AND NOT EXISTS (SELECT 1 FROM staging.claims c WHERE c.claim_id = vr.claim_id)
+            LIMIT p_batch_size
+        );
+        
+        GET DIAGNOSTICS batch_deleted = ROW_COUNT;
+        deleted_validations := deleted_validations + batch_deleted;
+        
+        EXIT WHEN batch_deleted = 0;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
     
     -- Delete old completed batches
     DELETE FROM staging.processing_batches pb
@@ -865,26 +1054,126 @@ BEGIN
       AND pb.end_time < (CURRENT_DATE - (p_days_to_keep || ' days')::interval);
     GET DIAGNOSTICS deleted_batches = ROW_COUNT;
 
+    -- Update table statistics
+    ANALYZE staging.claims;
+    ANALYZE staging.validation_results;
+    ANALYZE staging.processing_batches;
+
     result_message := format(
-        'Cleanup completed: %s claims, %s validation results, %s batches deleted',
+        'Optimized cleanup completed: %s claims, %s validation results, %s batches deleted',
         deleted_claims, deleted_validations, deleted_batches
     );
+    
     RETURN result_message;
 END;
-$$ LANGUAGE plpgsql;
-COMMENT ON FUNCTION staging.cleanup_old_data(INTEGER) IS 'Cleans up old processed and exported data from staging tables.';
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION staging.cleanup_old_data_optimized(INTEGER, INTEGER) IS 'Optimized cleanup with batching and statistics updates.';
 
 -- ===========================
--- GRANTS AND PERMISSIONS
+-- QUERY OPTIMIZATION CONFIGURATION
+-- ===========================
+
+-- Create extension for additional performance features if not exists
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS auto_explain;
+
+-- Configure auto_explain for query optimization
+SELECT set_config('auto_explain.log_min_duration', '1000', false); -- Log queries taking > 1 second
+SELECT set_config('auto_explain.log_analyze', 'true', false);
+SELECT set_config('auto_explain.log_buffers', 'true', false);
+SELECT set_config('auto_explain.log_format', 'json', false);
+
+-- ===========================
+-- AUTOMATED MAINTENANCE JOBS
+-- ===========================
+
+-- Function to be called by cron for automated maintenance
+CREATE OR REPLACE FUNCTION staging.automated_maintenance()
+RETURNS TEXT AS $
+DECLARE
+    result_text TEXT := '';
+    maintenance_start TIMESTAMP := clock_timestamp();
+BEGIN
+    -- Update search vectors
+    result_text := result_text || 'Search vectors updated: ' || staging.update_claim_search_vectors()::TEXT || ' records. ';
+    
+    -- Refresh materialized views during low-traffic hours
+    IF EXTRACT(HOUR FROM CURRENT_TIME) BETWEEN 2 AND 4 THEN
+        result_text := result_text || analytics.refresh_all_views();
+    END IF;
+    
+    -- Manage partitions
+    result_text := result_text || staging.manage_partitions();
+    
+    -- Update table statistics for frequently updated tables
+    ANALYZE staging.claims;
+    ANALYZE staging.validation_results;
+    
+    result_text := result_text || ' Maintenance completed in ' || 
+                  EXTRACT(EPOCH FROM (clock_timestamp() - maintenance_start))::TEXT || ' seconds.';
+    
+    RETURN result_text;
+END;
+$ LANGUAGE plpgsql;
+COMMENT ON FUNCTION staging.automated_maintenance() IS 'Automated maintenance function for cron scheduling.';
+
+-- ===========================
+-- PERFORMANCE MONITORING VIEWS
+-- ===========================
+
+CREATE OR REPLACE VIEW analytics.query_performance AS
+SELECT
+    query,
+    calls,
+    total_time,
+    mean_time,
+    rows,
+    100.0 * shared_blks_hit / nullif(shared_blks_hit + shared_blks_read, 0) AS hit_percent
+FROM pg_stat_statements
+WHERE query NOT LIKE '%pg_stat_statements%'
+ORDER BY total_time DESC
+LIMIT 20;
+COMMENT ON VIEW analytics.query_performance IS 'Top 20 queries by total execution time for performance monitoring.';
+
+CREATE OR REPLACE VIEW analytics.table_performance AS
+SELECT
+    schemaname,
+    tablename,
+    seq_scan,
+    seq_tup_read,
+    idx_scan,
+    idx_tup_fetch,
+    n_tup_ins,
+    n_tup_upd,
+    n_tup_del,
+    n_live_tup,
+    n_dead_tup,
+    vacuum_count,
+    autovacuum_count,
+    analyze_count,
+    autoanalyze_count
+FROM pg_stat_user_tables
+WHERE schemaname IN ('staging', 'edi', 'analytics')
+ORDER BY seq_tup_read + idx_tup_fetch DESC;
+COMMENT ON VIEW analytics.table_performance IS 'Table access patterns and maintenance statistics.';
+
+-- ===========================
+-- GRANTS AND PERMISSIONS FOR PERFORMANCE
 -- ===========================
 -- Example grants, adjust user names and permissions as needed.
 -- GRANT USAGE ON SCHEMA edi TO edi_app_user;
--- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA edi TO edi_app_user;
--- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA edi TO edi_app_user;
---
 -- GRANT USAGE ON SCHEMA staging TO edi_app_user;
+-- GRANT USAGE ON SCHEMA analytics TO edi_app_user;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA edi TO edi_app_user;
 -- GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA staging TO edi_app_user;
+-- GRANT SELECT ON ALL TABLES IN SCHEMA analytics TO edi_app_user;
+-- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA edi TO edi_app_user;
 -- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA staging TO edi_app_user;
 -- GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA staging TO edi_app_user;
+-- GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA analytics TO edi_app_user;
 
--- End of PostgreSQL Staging and EDI Master Database Schema
+-- Performance-related permissions
+-- GRANT SELECT ON pg_stat_statements TO edi_monitoring_user;
+-- GRANT SELECT ON pg_stat_user_tables TO edi_monitoring_user;
+
+-- End of Enhanced PostgreSQL Staging and EDI Master Database Schema with Performance Optimizations

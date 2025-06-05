@@ -1,6 +1,6 @@
 -- SQL Server Production Database Schema with Comprehensive Facility Management
+-- Enhanced with Performance Optimizations: Columnstore Indexes, Partitioning, Compression, and Monitoring
 -- ================================================================================
--- Corrected version with GO batch separators, especially for sp_addextendedproperty.
 
 -- Check if the database already exists and create it if not
 IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = 'edi_production')
@@ -12,6 +12,54 @@ GO
 -- Switch to the newly created database context
 USE edi_production;
 GO
+
+-- ===========================
+-- PARTITION FUNCTIONS AND SCHEMES
+-- ===========================
+
+-- Partition function for Claims by ServiceDate (monthly partitions)
+CREATE PARTITION FUNCTION pf_ClaimsByServiceDate (DATE)
+AS RANGE RIGHT FOR VALUES 
+(
+    '2023-01-01', '2023-02-01', '2023-03-01', '2023-04-01', '2023-05-01', '2023-06-01',
+    '2023-07-01', '2023-08-01', '2023-09-01', '2023-10-01', '2023-11-01', '2023-12-01',
+    '2024-01-01', '2024-02-01', '2024-03-01', '2024-04-01', '2024-05-01', '2024-06-01',
+    '2024-07-01', '2024-08-01', '2024-09-01', '2024-10-01', '2024-11-01', '2024-12-01',
+    '2025-01-01', '2025-02-01', '2025-03-01', '2025-04-01', '2025-05-01', '2025-06-01',
+    '2025-07-01', '2025-08-01', '2025-09-01', '2025-10-01', '2025-11-01', '2025-12-01',
+    '2026-01-01'
+);
+GO
+
+-- Partition scheme for Claims
+CREATE PARTITION SCHEME ps_ClaimsByServiceDate
+AS PARTITION pf_ClaimsByServiceDate
+ALL TO ([PRIMARY]);
+GO
+
+-- Partition function for Line Items by ServiceDateFrom (monthly partitions)
+CREATE PARTITION FUNCTION pf_LineItemsByServiceDate (DATE)
+AS RANGE RIGHT FOR VALUES 
+(
+    '2023-01-01', '2023-02-01', '2023-03-01', '2023-04-01', '2023-05-01', '2023-06-01',
+    '2023-07-01', '2023-08-01', '2023-09-01', '2023-10-01', '2023-11-01', '2023-12-01',
+    '2024-01-01', '2024-02-01', '2024-03-01', '2024-04-01', '2024-05-01', '2024-06-01',
+    '2024-07-01', '2024-08-01', '2024-09-01', '2024-10-01', '2024-11-01', '2024-12-01',
+    '2025-01-01', '2025-02-01', '2025-03-01', '2025-04-01', '2025-05-01', '2025-06-01',
+    '2025-07-01', '2025-08-01', '2025-09-01', '2025-10-01', '2025-11-01', '2025-12-01',
+    '2026-01-01'
+);
+GO
+
+-- Partition scheme for Line Items
+CREATE PARTITION SCHEME ps_LineItemsByServiceDate
+AS PARTITION pf_LineItemsByServiceDate
+ALL TO ([PRIMARY]);
+GO
+
+-- ===========================
+-- CORE TABLES WITH COMPRESSION
+-- ===========================
 
 -- Organizations table (supports one-to-many with regions)
 CREATE TABLE dbo.Organizations (
@@ -31,7 +79,7 @@ CREATE TABLE dbo.Organizations (
     Active BIT DEFAULT 1,
     CreatedDate DATETIME2 DEFAULT GETDATE(),
     UpdatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Regions table (can belong to multiple organizations - many-to-many)
@@ -43,7 +91,7 @@ CREATE TABLE dbo.Regions (
     Active BIT DEFAULT 1,
     CreatedDate DATETIME2 DEFAULT GETDATE(),
     UpdatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Organization-Region mapping table (many-to-many relationship)
@@ -55,7 +103,7 @@ CREATE TABLE dbo.OrganizationRegions (
     EndDate DATE,
     CreatedDate DATETIME2 DEFAULT GETDATE(),
     PRIMARY KEY (OrganizationId, RegionId)
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Facilities table (enhanced with all facility information)
@@ -92,7 +140,7 @@ CREATE TABLE dbo.Facilities (
     Active BIT DEFAULT 1,
     CreatedDate DATETIME2 DEFAULT GETDATE(),
     UpdatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Standard Payers lookup table
@@ -104,7 +152,7 @@ CREATE TABLE dbo.StandardPayers (
     Description NVARCHAR(MAX),
     Active BIT DEFAULT 1,
     CreatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- HCC (Hierarchical Condition Categories) types
@@ -116,7 +164,7 @@ CREATE TABLE dbo.HccTypes (
     Description NVARCHAR(MAX),
     Active BIT DEFAULT 1,
     CreatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Financial Classes table (enhanced payer information)
@@ -145,7 +193,7 @@ CREATE TABLE dbo.FinancialClasses (
     EndDate DATE,
     CreatedDate DATETIME2 DEFAULT GETDATE(),
     UpdatedDate DATETIME2 DEFAULT GETDATE()
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Clinical Departments table
@@ -179,10 +227,10 @@ CREATE TABLE dbo.ClinicalDepartments (
     UpdatedDate DATETIME2 DEFAULT GETDATE(),
 
     UNIQUE(ClinicalDepartmentCode, FacilityId)
-);
+) WITH (DATA_COMPRESSION = ROW);
 GO
 
--- Enhanced Claims table (production claims with facility relationships)
+-- Enhanced Claims table (production claims with facility relationships) - PARTITIONED
 CREATE TABLE dbo.Claims (
     ClaimId NVARCHAR(50) PRIMARY KEY,
     FacilityId NVARCHAR(50) REFERENCES dbo.Facilities(FacilityId), -- Links claim to facility
@@ -203,7 +251,7 @@ CREATE TABLE dbo.Claims (
 
     -- Service information
     PlaceOfService NVARCHAR(10),
-    ServiceDate DATE,
+    ServiceDate DATE NOT NULL, -- Required for partitioning
 
     -- Financial information
     TotalChargeAmount DECIMAL(12,2),
@@ -229,7 +277,7 @@ CREATE TABLE dbo.Claims (
     UpdatedDate DATETIME2 DEFAULT GETDATE(),
     CreatedBy NVARCHAR(100),
     UpdatedBy NVARCHAR(100)
-);
+) ON ps_ClaimsByServiceDate(ServiceDate) WITH (DATA_COMPRESSION = PAGE);
 GO
 
 -- CMS 1500 Diagnosis Codes Table (Section 21)
@@ -250,17 +298,17 @@ CREATE TABLE dbo.Cms1500Diagnoses (
 
     -- Ensure unique sequence numbers per claim
     UNIQUE(ClaimId, DiagnosisSequence)
-);
+) WITH (DATA_COMPRESSION = PAGE);
 GO
 
--- CMS 1500 Line Items Table (Sections 24A-J)
+-- CMS 1500 Line Items Table (Sections 24A-J) - PARTITIONED
 CREATE TABLE dbo.Cms1500LineItems (
     LineItemId BIGINT IDENTITY(1,1) PRIMARY KEY,
     ClaimId NVARCHAR(50) NOT NULL REFERENCES dbo.Claims(ClaimId) ON DELETE CASCADE,
     LineNumber INT NOT NULL CHECK (LineNumber BETWEEN 1 AND 99),
 
     -- Section 24A: Date of Service (From/To)
-    ServiceDateFrom DATE,
+    ServiceDateFrom DATE NOT NULL, -- Required for partitioning
     ServiceDateTo DATE,
 
     -- Section 24B: Place of Service
@@ -300,75 +348,317 @@ CREATE TABLE dbo.Cms1500LineItems (
 
     -- Ensure unique line numbers per claim
     UNIQUE(ClaimId, LineNumber)
+) ON ps_LineItemsByServiceDate(ServiceDateFrom) WITH (DATA_COMPRESSION = PAGE);
+GO
+
+-- Failed Claims Details table for UI (with compression)
+CREATE TABLE dbo.FailedClaimDetails (
+    FailedClaimDetailId BIGINT IDENTITY(1,1) PRIMARY KEY,
+    OriginalClaimId NVARCHAR(50) NOT NULL,
+    StagingClaimId NVARCHAR(50),
+    FacilityId NVARCHAR(50),
+    PatientAccountNumber NVARCHAR(50),
+    ServiceDate DATE,
+    FailureTimestamp DATETIME2 NOT NULL DEFAULT GETDATE(),
+    ProcessingStage NVARCHAR(100) NOT NULL,
+    ErrorCodes NVARCHAR(MAX),
+    ErrorMessages NVARCHAR(MAX) NOT NULL,
+    ClaimDataSnapshot NVARCHAR(MAX),
+    Status NVARCHAR(50) NOT NULL DEFAULT 'New',
+    ResolutionNotes NVARCHAR(MAX),
+    ResolvedBy NVARCHAR(100),
+    ResolvedTimestamp DATETIME2,
+    CreatedDate DATETIME2 DEFAULT GETDATE(),
+    UpdatedDate DATETIME2 DEFAULT GETDATE()
+) WITH (DATA_COMPRESSION = PAGE);
+GO
+
+-- ===========================
+-- COLUMNSTORE INDEXES FOR ANALYTICS
+-- ===========================
+
+-- Columnstore index for Claims analytics
+CREATE NONCLUSTERED COLUMNSTORE INDEX IX_Claims_Analytics_Columnstore
+ON dbo.Claims (
+    FacilityId, DepartmentId, FinancialClassId, ServiceDate, 
+    TotalChargeAmount, TotalClaimCharges, ProcessingStatus, 
+    ValidationStatus, PatientAge, PatientSex, CreatedDate
+);
+GO
+
+-- Columnstore index for Line Items analytics
+CREATE NONCLUSTERED COLUMNSTORE INDEX IX_LineItems_Analytics_Columnstore
+ON dbo.Cms1500LineItems (
+    ClaimId, ServiceDateFrom, ServiceDateTo, CptCode, 
+    LineChargeAmount, Units, PlaceOfServiceCode, CreatedDate
+);
+GO
+
+-- Columnstore index for Diagnoses analytics
+CREATE NONCLUSTERED COLUMNSTORE INDEX IX_Diagnoses_Analytics_Columnstore
+ON dbo.Cms1500Diagnoses (
+    ClaimId, IcdCode, IcdCodeType, DiagnosisSequence, 
+    IsPrimary, CreatedDate
+);
+GO
+
+-- Columnstore index for Failed Claims analytics
+CREATE NONCLUSTERED COLUMNSTORE INDEX IX_FailedClaims_Analytics_Columnstore
+ON dbo.FailedClaimDetails (
+    FacilityId, ProcessingStage, Status, FailureTimestamp, 
+    ServiceDate, CreatedDate
 );
 GO
 
 -- ===========================
--- INDEXES FOR PERFORMANCE
+-- REGULAR INDEXES FOR PERFORMANCE (with compression)
 -- ===========================
 
 -- Organization indexes
-CREATE INDEX IX_Organizations_Active ON dbo.Organizations(Active);
-CREATE INDEX IX_Organizations_Code ON dbo.Organizations(OrganizationCode);
+CREATE INDEX IX_Organizations_Active ON dbo.Organizations(Active) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Organizations_Code ON dbo.Organizations(OrganizationCode) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Region indexes
-CREATE INDEX IX_Regions_Active ON dbo.Regions(Active);
-CREATE INDEX IX_Regions_Code ON dbo.Regions(RegionCode);
+CREATE INDEX IX_Regions_Active ON dbo.Regions(Active) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Regions_Code ON dbo.Regions(RegionCode) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Organization-Region mapping indexes
-CREATE INDEX IX_OrganizationRegions_Org ON dbo.OrganizationRegions(OrganizationId);
-CREATE INDEX IX_OrganizationRegions_Region ON dbo.OrganizationRegions(RegionId);
-CREATE INDEX IX_OrganizationRegions_Primary ON dbo.OrganizationRegions(IsPrimary) WHERE IsPrimary = 1;
+CREATE INDEX IX_OrganizationRegions_Org ON dbo.OrganizationRegions(OrganizationId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_OrganizationRegions_Region ON dbo.OrganizationRegions(RegionId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_OrganizationRegions_Primary ON dbo.OrganizationRegions(IsPrimary) WHERE IsPrimary = 1 WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Facility indexes
-CREATE INDEX IX_Facilities_Org ON dbo.Facilities(OrganizationId);
-CREATE INDEX IX_Facilities_Region ON dbo.Facilities(RegionId);
-CREATE INDEX IX_Facilities_Active ON dbo.Facilities(Active);
-CREATE INDEX IX_Facilities_Type ON dbo.Facilities(FacilityType);
-CREATE INDEX IX_Facilities_State ON dbo.Facilities(StateCode);
+CREATE INDEX IX_Facilities_Org ON dbo.Facilities(OrganizationId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Facilities_Region ON dbo.Facilities(RegionId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Facilities_Active ON dbo.Facilities(Active) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Facilities_Type ON dbo.Facilities(FacilityType) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_Facilities_State ON dbo.Facilities(StateCode) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Standard Payer indexes
-CREATE INDEX IX_StandardPayers_Active ON dbo.StandardPayers(Active);
-CREATE INDEX IX_StandardPayers_Category ON dbo.StandardPayers(PayerCategory);
+CREATE INDEX IX_StandardPayers_Active ON dbo.StandardPayers(Active) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_StandardPayers_Category ON dbo.StandardPayers(PayerCategory) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Financial class indexes
-CREATE INDEX IX_FinancialClasses_Facility ON dbo.FinancialClasses(FacilityId);
-CREATE INDEX IX_FinancialClasses_Payer ON dbo.FinancialClasses(StandardPayerId);
-CREATE INDEX IX_FinancialClasses_Active ON dbo.FinancialClasses(Active);
+CREATE INDEX IX_FinancialClasses_Facility ON dbo.FinancialClasses(FacilityId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_FinancialClasses_Payer ON dbo.FinancialClasses(StandardPayerId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_FinancialClasses_Active ON dbo.FinancialClasses(Active) WITH (DATA_COMPRESSION = ROW);
 GO
 
 -- Department indexes
-CREATE INDEX IX_ClinicalDepartments_Facility ON dbo.ClinicalDepartments(FacilityId);
-CREATE INDEX IX_ClinicalDepartments_Code ON dbo.ClinicalDepartments(ClinicalDepartmentCode);
-CREATE INDEX IX_ClinicalDepartments_Active ON dbo.ClinicalDepartments(Active);
-CREATE INDEX IX_ClinicalDepartments_Type ON dbo.ClinicalDepartments(DepartmentType);
+CREATE INDEX IX_ClinicalDepartments_Facility ON dbo.ClinicalDepartments(FacilityId) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_ClinicalDepartments_Code ON dbo.ClinicalDepartments(ClinicalDepartmentCode) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_ClinicalDepartments_Active ON dbo.ClinicalDepartments(Active) WITH (DATA_COMPRESSION = ROW);
+CREATE INDEX IX_ClinicalDepartments_Type ON dbo.ClinicalDepartments(DepartmentType) WITH (DATA_COMPRESSION = ROW);
 GO
 
--- Enhanced claim indexes
-CREATE INDEX IX_Claims_Facility ON dbo.Claims(FacilityId);
-CREATE INDEX IX_Claims_Department ON dbo.Claims(DepartmentId);
-CREATE INDEX IX_Claims_FinancialClass ON dbo.Claims(FinancialClassId);
-CREATE INDEX IX_Claims_Status_Facility ON dbo.Claims(ProcessingStatus, FacilityId);
-CREATE INDEX IX_Claims_ServiceDate_Facility ON dbo.Claims(ServiceDate, FacilityId);
-CREATE INDEX IX_Claims_ValidationStatus ON dbo.Claims(ValidationStatus);
-CREATE INDEX IX_Claims_ProcessingStatus ON dbo.Claims(ProcessingStatus);
+-- Enhanced claim indexes (partitioned tables)
+CREATE INDEX IX_Claims_Facility ON dbo.Claims(FacilityId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_Department ON dbo.Claims(DepartmentId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_FinancialClass ON dbo.Claims(FinancialClassId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_Status_Facility ON dbo.Claims(ProcessingStatus, FacilityId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_ServiceDate_Facility ON dbo.Claims(ServiceDate, FacilityId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_ValidationStatus ON dbo.Claims(ValidationStatus) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_ProcessingStatus ON dbo.Claims(ProcessingStatus) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Claims_CreatedDate ON dbo.Claims(CreatedDate) WITH (DATA_COMPRESSION = PAGE);
 GO
 
 -- CMS 1500 indexes
-CREATE INDEX IX_Cms1500Diagnoses_Claim ON dbo.Cms1500Diagnoses(ClaimId);
-CREATE INDEX IX_Cms1500Diagnoses_IcdCode ON dbo.Cms1500Diagnoses(IcdCode);
-CREATE INDEX IX_Cms1500LineItems_Claim ON dbo.Cms1500LineItems(ClaimId);
-CREATE INDEX IX_Cms1500LineItems_CptCode ON dbo.Cms1500LineItems(CptCode);
-CREATE INDEX IX_Cms1500LineItems_ServiceDate ON dbo.Cms1500LineItems(ServiceDateFrom);
+CREATE INDEX IX_Cms1500Diagnoses_Claim ON dbo.Cms1500Diagnoses(ClaimId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Cms1500Diagnoses_IcdCode ON dbo.Cms1500Diagnoses(IcdCode) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Cms1500LineItems_Claim ON dbo.Cms1500LineItems(ClaimId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Cms1500LineItems_CptCode ON dbo.Cms1500LineItems(CptCode) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_Cms1500LineItems_ServiceDate ON dbo.Cms1500LineItems(ServiceDateFrom) WITH (DATA_COMPRESSION = PAGE);
+GO
+
+-- Failed Claims indexes
+CREATE INDEX IX_FailedClaimDetails_OriginalClaimId ON dbo.FailedClaimDetails(OriginalClaimId) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_FailedClaimDetails_Status ON dbo.FailedClaimDetails(Status) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_FailedClaimDetails_ProcessingStage ON dbo.FailedClaimDetails(ProcessingStage) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_FailedClaimDetails_FailureTimestamp ON dbo.FailedClaimDetails(FailureTimestamp) WITH (DATA_COMPRESSION = PAGE);
+CREATE INDEX IX_FailedClaimDetails_FacilityId ON dbo.FailedClaimDetails(FacilityId) WITH (DATA_COMPRESSION = PAGE);
 GO
 
 -- ===========================
--- VIEWS FOR REPORTING
+-- PERFORMANCE MONITORING VIEWS
+-- ===========================
+
+-- Real-time processing performance view
+CREATE VIEW dbo.vw_ProcessingPerformance AS
+SELECT
+    -- Current processing metrics
+    COUNT(*) as TotalClaimsInSystem,
+    COUNT(CASE WHEN ProcessingStatus = 'PENDING' THEN 1 END) as PendingClaims,
+    COUNT(CASE WHEN ProcessingStatus = 'PROCESSING' THEN 1 END) as ProcessingClaims,
+    COUNT(CASE WHEN ProcessingStatus = 'COMPLETED' THEN 1 END) as CompletedClaims,
+    COUNT(CASE WHEN ProcessingStatus = 'ERROR' THEN 1 END) as ErrorClaims,
+    
+    -- Performance metrics
+    AVG(DATEDIFF(MINUTE, CreatedDate, ProcessedDate)) as AvgProcessingTimeMinutes,
+    COUNT(CASE WHEN CreatedDate >= DATEADD(HOUR, -1, GETDATE()) THEN 1 END) as ClaimsLastHour,
+    COUNT(CASE WHEN CreatedDate >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as ClaimsLast24Hours,
+    
+    -- Throughput calculations
+    CASE 
+        WHEN COUNT(CASE WHEN ProcessedDate >= DATEADD(HOUR, -1, GETDATE()) THEN 1 END) > 0 
+        THEN COUNT(CASE WHEN ProcessedDate >= DATEADD(HOUR, -1, GETDATE()) THEN 1 END) / 1.0
+        ELSE 0 
+    END as ProcessedClaimsPerHour,
+    
+    -- Financial metrics
+    SUM(TotalChargeAmount) as TotalChargesInSystem,
+    AVG(TotalChargeAmount) as AvgClaimAmount,
+    
+    -- Data quality metrics
+    COUNT(CASE WHEN ValidationStatus = 'VALIDATED' THEN 1 END) as ValidatedClaims,
+    CAST(COUNT(CASE WHEN ValidationStatus = 'VALIDATED' THEN 1 END) * 100.0 / COUNT(*) AS DECIMAL(5,2)) as ValidationSuccessRate
+FROM dbo.Claims
+WHERE CreatedDate >= DATEADD(DAY, -30, GETDATE()); -- Last 30 days
+GO
+
+-- System health and capacity view
+CREATE VIEW dbo.vw_SystemHealth AS
+SELECT
+    -- Table sizes and row counts
+    'Claims' as TableName,
+    COUNT(*) as RowCount,
+    COUNT(*) * 8 / 1024.0 as EstimatedSizeMB, -- Rough estimate
+    MAX(CreatedDate) as LastInsert,
+    MIN(CreatedDate) as OldestRecord,
+    COUNT(CASE WHEN CreatedDate >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as RecordsLast24Hours
+FROM dbo.Claims
+
+UNION ALL
+
+SELECT
+    'Cms1500LineItems' as TableName,
+    COUNT(*) as RowCount,
+    COUNT(*) * 4 / 1024.0 as EstimatedSizeMB,
+    MAX(CreatedDate) as LastInsert,
+    MIN(CreatedDate) as OldestRecord,
+    COUNT(CASE WHEN CreatedDate >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as RecordsLast24Hours
+FROM dbo.Cms1500LineItems
+
+UNION ALL
+
+SELECT
+    'FailedClaimDetails' as TableName,
+    COUNT(*) as RowCount,
+    COUNT(*) * 6 / 1024.0 as EstimatedSizeMB,
+    MAX(CreatedDate) as LastInsert,
+    MIN(CreatedDate) as OldestRecord,
+    COUNT(CASE WHEN CreatedDate >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as RecordsLast24Hours
+FROM dbo.FailedClaimDetails;
+GO
+
+-- Partition performance view
+CREATE VIEW dbo.vw_PartitionPerformance AS
+SELECT
+    t.name as TableName,
+    p.partition_number,
+    p.rows as RowCount,
+    CAST(p.rows * 8 / 1024.0 AS DECIMAL(10,2)) as EstimatedSizeMB,
+    rv.value as PartitionBoundary,
+    fg.name as FileGroupName
+FROM sys.tables t
+INNER JOIN sys.partitions p ON t.object_id = p.object_id
+INNER JOIN sys.partition_schemes ps ON p.partition_number = ps.data_space_id
+INNER JOIN sys.partition_functions pf ON ps.function_id = pf.function_id
+LEFT JOIN sys.partition_range_values rv ON pf.function_id = rv.function_id 
+    AND p.partition_number = rv.boundary_id + 1
+LEFT JOIN sys.filegroups fg ON p.data_compression_desc = fg.name
+WHERE t.name IN ('Claims', 'Cms1500LineItems')
+    AND p.index_id IN (0,1); -- Clustered index or heap
+GO
+
+-- Failed claims analytics view
+CREATE VIEW dbo.vw_FailedClaimsAnalytics AS
+SELECT
+    ProcessingStage,
+    Status,
+    COUNT(*) as FailureCount,
+    COUNT(CASE WHEN FailureTimestamp >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as FailuresLast24Hours,
+    COUNT(CASE WHEN FailureTimestamp >= DATEADD(DAY, -7, GETDATE()) THEN 1 END) as FailuresLast7Days,
+    AVG(CASE WHEN ResolvedTimestamp IS NOT NULL 
+        THEN DATEDIFF(HOUR, FailureTimestamp, ResolvedTimestamp) END) as AvgResolutionTimeHours,
+    COUNT(CASE WHEN Status = 'Resolved' THEN 1 END) as ResolvedCount,
+    CAST(COUNT(CASE WHEN Status = 'Resolved' THEN 1 END) * 100.0 / COUNT(*) AS DECIMAL(5,2)) as ResolutionRate
+FROM dbo.FailedClaimDetails
+WHERE FailureTimestamp >= DATEADD(DAY, -30, GETDATE()) -- Last 30 days
+GROUP BY ProcessingStage, Status;
+GO
+
+-- Facility performance view with compression statistics
+CREATE VIEW dbo.vw_FacilityPerformance AS
+SELECT
+    f.FacilityId,
+    f.FacilityName,
+    f.FacilityType,
+    f.CriticalAccess,
+    
+    -- Claim volumes
+    COUNT(c.ClaimId) as TotalClaims,
+    COUNT(CASE WHEN c.CreatedDate >= DATEADD(DAY, -1, GETDATE()) THEN 1 END) as ClaimsLast24Hours,
+    COUNT(CASE WHEN c.CreatedDate >= DATEADD(DAY, -7, GETDATE()) THEN 1 END) as ClaimsLast7Days,
+    
+    -- Processing performance
+    AVG(CASE WHEN c.ProcessedDate IS NOT NULL 
+        THEN DATEDIFF(MINUTE, c.CreatedDate, c.ProcessedDate) END) as AvgProcessingTimeMinutes,
+    COUNT(CASE WHEN c.ProcessingStatus = 'COMPLETED' THEN 1 END) as CompletedClaims,
+    COUNT(CASE WHEN c.ProcessingStatus = 'ERROR' THEN 1 END) as ErrorClaims,
+    
+    -- Financial metrics
+    SUM(c.TotalChargeAmount) as TotalCharges,
+    AVG(c.TotalChargeAmount) as AvgChargeAmount,
+    
+    -- Quality metrics
+    COUNT(CASE WHEN c.ValidationStatus = 'VALIDATED' THEN 1 END) as ValidatedClaims,
+    CAST(COUNT(CASE WHEN c.ValidationStatus = 'VALIDATED' THEN 1 END) * 100.0 / 
+         NULLIF(COUNT(c.ClaimId), 0) AS DECIMAL(5,2)) as ValidationSuccessRate,
+    
+    -- Failed claims
+    (SELECT COUNT(*) FROM dbo.FailedClaimDetails fcd WHERE fcd.FacilityId = f.FacilityId) as FailedClaimsCount
+    
+FROM dbo.Facilities f
+LEFT JOIN dbo.Claims c ON f.FacilityId = c.FacilityId
+WHERE f.Active = 1
+GROUP BY f.FacilityId, f.FacilityName, f.FacilityType, f.CriticalAccess;
+GO
+
+-- Index usage and performance view
+CREATE VIEW dbo.vw_IndexPerformance AS
+SELECT
+    OBJECT_SCHEMA_NAME(i.object_id) as SchemaName,
+    OBJECT_NAME(i.object_id) as TableName,
+    i.name as IndexName,
+    i.type_desc as IndexType,
+    ius.user_seeks,
+    ius.user_scans,
+    ius.user_lookups,
+    ius.user_updates,
+    ius.user_seeks + ius.user_scans + ius.user_lookups as TotalReads,
+    CASE 
+        WHEN ius.user_updates > 0 
+        THEN (ius.user_seeks + ius.user_scans + ius.user_lookups) / CAST(ius.user_updates AS FLOAT)
+        ELSE NULL
+    END as ReadWriteRatio,
+    ps.avg_fragmentation_in_percent,
+    ps.page_count
+FROM sys.indexes i
+LEFT JOIN sys.dm_db_index_usage_stats ius ON i.object_id = ius.object_id AND i.index_id = ius.index_id
+LEFT JOIN sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, 'LIMITED') ps 
+    ON i.object_id = ps.object_id AND i.index_id = ps.index_id
+WHERE OBJECT_SCHEMA_NAME(i.object_id) = 'dbo'
+    AND i.type > 0 -- Exclude heaps
+    AND OBJECT_NAME(i.object_id) IN ('Claims', 'Cms1500LineItems', 'Cms1500Diagnoses', 'FailedClaimDetails');
+GO
+
+-- ===========================
+-- VIEWS FOR REPORTING (Enhanced)
 -- ===========================
 
 CREATE VIEW dbo.vw_FacilityDetails AS
@@ -493,7 +783,7 @@ GROUP BY cd.DepartmentId, cd.ClinicalDepartmentCode, cd.DepartmentDescription,
 GO
 
 -- ===========================
--- STORED PROCEDURES
+-- STORED PROCEDURES (Enhanced)
 -- ===========================
 
 CREATE PROCEDURE dbo.sp_GetFacilityHierarchy
@@ -609,6 +899,109 @@ BEGIN
 END;
 GO
 
+-- Performance optimization procedure
+CREATE PROCEDURE dbo.sp_PerformanceOptimization
+    @Action NVARCHAR(50) = 'ANALYZE', -- ANALYZE, REBUILD_INDEXES, UPDATE_STATS, MANAGE_PARTITIONS
+    @TableName NVARCHAR(128) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    IF @Action = 'ANALYZE'
+    BEGIN
+        -- Return performance analysis
+        SELECT 'Performance Analysis Results' as Action;
+        
+        SELECT * FROM dbo.vw_ProcessingPerformance;
+        SELECT * FROM dbo.vw_SystemHealth;
+        SELECT * FROM dbo.vw_PartitionPerformance;
+        
+        -- Show fragmented indexes
+        SELECT 
+            SchemaName, TableName, IndexName, 
+            avg_fragmentation_in_percent as FragmentationPercent,
+            page_count as PageCount
+        FROM dbo.vw_IndexPerformance 
+        WHERE avg_fragmentation_in_percent > 10
+        ORDER BY avg_fragmentation_in_percent DESC;
+    END
+    
+    ELSE IF @Action = 'REBUILD_INDEXES'
+    BEGIN
+        DECLARE @SQL NVARCHAR(MAX);
+        DECLARE @IndexName NVARCHAR(128);
+        DECLARE @SchemaName NVARCHAR(128);
+        DECLARE @TableNameLocal NVARCHAR(128);
+        
+        DECLARE index_cursor CURSOR FOR
+        SELECT SchemaName, TableName, IndexName
+        FROM dbo.vw_IndexPerformance 
+        WHERE avg_fragmentation_in_percent > 30
+            AND (@TableName IS NULL OR TableName = @TableName)
+            AND page_count > 1000; -- Only rebuild substantial indexes
+        
+        OPEN index_cursor;
+        FETCH NEXT FROM index_cursor INTO @SchemaName, @TableNameLocal, @IndexName;
+        
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @SQL = 'ALTER INDEX [' + @IndexName + '] ON [' + @SchemaName + '].[' + @TableNameLocal + '] REBUILD WITH (ONLINE = ON, DATA_COMPRESSION = PAGE);';
+            
+            BEGIN TRY
+                EXEC sp_executesql @SQL;
+                PRINT 'Rebuilt index: ' + @IndexName + ' on ' + @SchemaName + '.' + @TableNameLocal;
+            END TRY
+            BEGIN CATCH
+                PRINT 'Failed to rebuild index: ' + @IndexName + ' - ' + ERROR_MESSAGE();
+            END CATCH
+            
+            FETCH NEXT FROM index_cursor INTO @SchemaName, @TableNameLocal, @IndexName;
+        END
+        
+        CLOSE index_cursor;
+        DEALLOCATE index_cursor;
+    END
+    
+    ELSE IF @Action = 'UPDATE_STATS'
+    BEGIN
+        -- Update statistics for main tables
+        UPDATE STATISTICS dbo.Claims WITH FULLSCAN;
+        UPDATE STATISTICS dbo.Cms1500LineItems WITH FULLSCAN;
+        UPDATE STATISTICS dbo.Cms1500Diagnoses WITH FULLSCAN;
+        UPDATE STATISTICS dbo.FailedClaimDetails WITH FULLSCAN;
+        
+        PRINT 'Statistics updated for main tables';
+    END
+    
+    ELSE IF @Action = 'MANAGE_PARTITIONS'
+    BEGIN
+        -- Add future partitions if needed
+        DECLARE @NextBoundary DATE = DATEADD(MONTH, 1, EOMONTH(GETDATE()));
+        DECLARE @PartitionFunction NVARCHAR(128);
+        
+        -- Check if we need to add partitions for next 3 months
+        WHILE @NextBoundary <= DATEADD(MONTH, 3, GETDATE())
+        BEGIN
+            -- Check if partition already exists for this boundary
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.partition_range_values rv
+                INNER JOIN sys.partition_functions pf ON rv.function_id = pf.function_id
+                WHERE pf.name IN ('pf_ClaimsByServiceDate', 'pf_LineItemsByServiceDate')
+                    AND rv.value = @NextBoundary
+            )
+            BEGIN
+                -- Add partition (this would need to be customized based on your partitioning strategy)
+                PRINT 'Would add partition for boundary: ' + CAST(@NextBoundary AS NVARCHAR(10));
+                -- ALTER PARTITION SCHEME ps_ClaimsByServiceDate NEXT USED [PRIMARY];
+                -- ALTER PARTITION FUNCTION pf_ClaimsByServiceDate() SPLIT RANGE (@NextBoundary);
+            END
+            
+            SET @NextBoundary = DATEADD(MONTH, 1, @NextBoundary);
+        END
+    END
+END;
+GO
+
 -- ===========================
 -- SAMPLE DATA INSERTION
 -- ===========================
@@ -720,22 +1113,292 @@ BEGIN SET NOCOUNT ON; UPDATE dbo.ClinicalDepartments SET UpdatedDate = GETDATE()
 GO
 
 -- ===========================
--- PERMISSIONS (Adjust as needed)
+-- MAINTENANCE JOBS (Templates)
 -- ===========================
-/*
-IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'YourApplicationUser')
+
+-- Create a stored procedure for automated maintenance
+CREATE PROCEDURE dbo.sp_AutomatedMaintenance
+AS
 BEGIN
-    CREATE USER [YourApplicationUser] WITHOUT LOGIN;
-END
+    SET NOCOUNT ON;
+    
+    -- Log maintenance start
+    PRINT 'Starting automated maintenance at ' + CAST(GETDATE() AS NVARCHAR(50));
+    
+    -- Update statistics
+    EXEC dbo.sp_PerformanceOptimization @Action = 'UPDATE_STATS';
+    
+    -- Analyze performance and rebuild highly fragmented indexes
+    DECLARE @FragmentedIndexes INT;
+    SELECT @FragmentedIndexes = COUNT(*)
+    FROM dbo.vw_IndexPerformance 
+    WHERE avg_fragmentation_in_percent > 30;
+    
+    IF @FragmentedIndexes > 0
+    BEGIN
+        PRINT 'Found ' + CAST(@FragmentedIndexes AS NVARCHAR(10)) + ' highly fragmented indexes. Rebuilding...';
+        EXEC dbo.sp_PerformanceOptimization @Action = 'REBUILD_INDEXES';
+    END
+    
+    -- Archive old failed claims (older than 90 days and resolved)
+    DELETE FROM dbo.FailedClaimDetails 
+    WHERE Status = 'Resolved' 
+        AND ResolvedTimestamp < DATEADD(DAY, -90, GETDATE());
+    
+    DECLARE @ArchivedCount INT = @@ROWCOUNT;
+    IF @ArchivedCount > 0
+    BEGIN
+        PRINT 'Archived ' + CAST(@ArchivedCount AS NVARCHAR(10)) + ' old resolved failed claims.';
+    END
+    
+    -- Manage partitions
+    EXEC dbo.sp_PerformanceOptimization @Action = 'MANAGE_PARTITIONS';
+    
+    PRINT 'Automated maintenance completed at ' + CAST(GETDATE() AS NVARCHAR(50));
+END;
 GO
-GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo TO [YourApplicationUser];
-GRANT EXECUTE ON SCHEMA::dbo TO [YourApplicationUser];
+
+-- ===========================
+-- COMPRESSION MONITORING
+-- ===========================
+
+CREATE VIEW dbo.vw_CompressionStats AS
+SELECT 
+    s.name as SchemaName,
+    t.name as TableName,
+    i.name as IndexName,
+    p.partition_number,
+    p.data_compression_desc as CompressionType,
+    p.rows as RowCount,
+    CAST(SUM(au.total_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as SizeMB,
+    CAST(SUM(au.used_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as UsedMB,
+    CAST(SUM(au.data_pages) * 8.0 / 1024 AS DECIMAL(10,2)) as DataMB
+FROM sys.tables t
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+INNER JOIN sys.indexes i ON t.object_id = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units au ON p.partition_id = au.container_id
+WHERE s.name = 'dbo'
+    AND t.name IN ('Claims', 'Cms1500LineItems', 'Cms1500Diagnoses', 'FailedClaimDetails')
+GROUP BY s.name, t.name, i.name, p.partition_number, p.data_compression_desc, p.rows;
 GO
-*/
+
+-- ===========================
+-- REAL-TIME MONITORING VIEWS
+-- ===========================
+
+-- Real-time claim processing dashboard
+CREATE VIEW dbo.vw_RealTimeDashboard AS
+SELECT
+    -- Current timestamp
+    GETDATE() as LastUpdated,
+    
+    -- Processing volumes
+    (SELECT COUNT(*) FROM dbo.Claims WHERE CreatedDate >= CAST(GETDATE() AS DATE)) as ClaimsToday,
+    (SELECT COUNT(*) FROM dbo.Claims WHERE CreatedDate >= DATEADD(HOUR, -1, GETDATE())) as ClaimsLastHour,
+    (SELECT COUNT(*) FROM dbo.Claims WHERE ProcessingStatus = 'PENDING') as PendingClaims,
+    (SELECT COUNT(*) FROM dbo.Claims WHERE ProcessingStatus = 'PROCESSING') as ProcessingClaims,
+    
+    -- Error rates
+    (SELECT COUNT(*) FROM dbo.FailedClaimDetails WHERE FailureTimestamp >= CAST(GETDATE() AS DATE)) as FailuresToday,
+    (SELECT COUNT(*) FROM dbo.FailedClaimDetails WHERE FailureTimestamp >= DATEADD(HOUR, -1, GETDATE())) as FailuresLastHour,
+    
+    -- Performance metrics
+    (SELECT AVG(DATEDIFF(SECOND, CreatedDate, ProcessedDate)) 
+     FROM dbo.Claims 
+     WHERE ProcessedDate >= DATEADD(HOUR, -1, GETDATE())) as AvgProcessingTimeSeconds,
+    
+    -- Financial metrics
+    (SELECT SUM(TotalChargeAmount) FROM dbo.Claims WHERE CreatedDate >= CAST(GETDATE() AS DATE)) as TotalChargesProcessedToday,
+    
+    -- System capacity
+    (SELECT COUNT(*) FROM dbo.Claims) as TotalClaimsInSystem,
+    (SELECT COUNT(DISTINCT FacilityId) FROM dbo.Claims WHERE CreatedDate >= CAST(GETDATE() AS DATE)) as ActiveFacilitiesToday;
+GO
+
+-- Alert conditions view
+CREATE VIEW dbo.vw_SystemAlerts AS
+SELECT
+    AlertType,
+    AlertMessage,
+    Severity,
+    AlertValue,
+    Threshold,
+    GETDATE() as CheckTime
+FROM (
+    -- High error rate alert
+    SELECT 
+        'ERROR_RATE' as AlertType,
+        'High error rate detected in last hour' as AlertMessage,
+        'HIGH' as Severity,
+        CAST((SELECT COUNT(*) FROM dbo.FailedClaimDetails WHERE FailureTimestamp >= DATEADD(HOUR, -1, GETDATE())) AS FLOAT) /
+        NULLIF((SELECT COUNT(*) FROM dbo.Claims WHERE CreatedDate >= DATEADD(HOUR, -1, GETDATE())), 0) * 100 as AlertValue,
+        10.0 as Threshold
+    
+    UNION ALL
+    
+    -- Slow processing alert
+    SELECT 
+        'SLOW_PROCESSING' as AlertType,
+        'Average processing time exceeds threshold' as AlertMessage,
+        'MEDIUM' as Severity,
+        (SELECT AVG(CAST(DATEDIFF(SECOND, CreatedDate, ProcessedDate) AS FLOAT)) 
+         FROM dbo.Claims 
+         WHERE ProcessedDate >= DATEADD(HOUR, -1, GETDATE())) as AlertValue,
+        300.0 as Threshold -- 5 minutes
+    
+    UNION ALL
+    
+    -- High pending volume alert
+    SELECT 
+        'HIGH_PENDING_VOLUME' as AlertType,
+        'Large number of pending claims detected' as AlertMessage,
+        'MEDIUM' as Severity,
+        CAST((SELECT COUNT(*) FROM dbo.Claims WHERE ProcessingStatus = 'PENDING') AS FLOAT) as AlertValue,
+        1000.0 as Threshold
+    
+    UNION ALL
+    
+    -- Database size alert
+    SELECT 
+        'DATABASE_SIZE' as AlertType,
+        'Database size approaching capacity' as AlertMessage,
+        'LOW' as Severity,
+        (SELECT SUM(SizeMB) FROM dbo.vw_CompressionStats) as AlertValue,
+        10000.0 as Threshold -- 10GB
+) alerts
+WHERE AlertValue > Threshold;
+GO
+
+-- ===========================
+-- AUTOMATED PARTITION MANAGEMENT
+-- ===========================
+
+CREATE PROCEDURE dbo.sp_ManagePartitions
+    @Action NVARCHAR(20) = 'ADD_FUTURE', -- ADD_FUTURE, DROP_OLD, ANALYZE
+    @MonthsAhead INT = 6,
+    @MonthsToKeep INT = 24
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    IF @Action = 'ADD_FUTURE'
+    BEGIN
+        -- Add partitions for future months
+        DECLARE @CurrentBoundary DATE = DATEADD(MONTH, 1, EOMONTH(GETDATE()));
+        DECLARE @EndBoundary DATE = DATEADD(MONTH, @MonthsAhead, EOMONTH(GETDATE()));
+        DECLARE @SQL NVARCHAR(MAX);
+        
+        WHILE @CurrentBoundary <= @EndBoundary
+        BEGIN
+            -- Check if partition boundary already exists
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.partition_range_values rv
+                INNER JOIN sys.partition_functions pf ON rv.function_id = pf.function_id
+                WHERE pf.name = 'pf_ClaimsByServiceDate'
+                    AND CAST(rv.value AS DATE) = @CurrentBoundary
+            )
+            BEGIN
+                -- Add new partition boundary
+                SET @SQL = 'ALTER PARTITION SCHEME ps_ClaimsByServiceDate NEXT USED [PRIMARY]; ' +
+                          'ALTER PARTITION FUNCTION pf_ClaimsByServiceDate() SPLIT RANGE (''' + 
+                          CAST(@CurrentBoundary AS NVARCHAR(10)) + ''');';
+                
+                BEGIN TRY
+                    EXEC sp_executesql @SQL;
+                    PRINT 'Added partition boundary for Claims: ' + CAST(@CurrentBoundary AS NVARCHAR(10));
+                END TRY
+                BEGIN CATCH
+                    PRINT 'Failed to add partition boundary for Claims: ' + ERROR_MESSAGE();
+                END CATCH
+            END
+            
+            -- Same for LineItems
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.partition_range_values rv
+                INNER JOIN sys.partition_functions pf ON rv.function_id = pf.function_id
+                WHERE pf.name = 'pf_LineItemsByServiceDate'
+                    AND CAST(rv.value AS DATE) = @CurrentBoundary
+            )
+            BEGIN
+                SET @SQL = 'ALTER PARTITION SCHEME ps_LineItemsByServiceDate NEXT USED [PRIMARY]; ' +
+                          'ALTER PARTITION FUNCTION pf_LineItemsByServiceDate() SPLIT RANGE (''' + 
+                          CAST(@CurrentBoundary AS NVARCHAR(10)) + ''');';
+                
+                BEGIN TRY
+                    EXEC sp_executesql @SQL;
+                    PRINT 'Added partition boundary for LineItems: ' + CAST(@CurrentBoundary AS NVARCHAR(10));
+                END TRY
+                BEGIN CATCH
+                    PRINT 'Failed to add partition boundary for LineItems: ' + ERROR_MESSAGE();
+                END CATCH
+            END
+            
+            SET @CurrentBoundary = DATEADD(MONTH, 1, @CurrentBoundary);
+        END
+    END
+    
+    ELSE IF @Action = 'ANALYZE'
+    BEGIN
+        -- Show partition information
+        SELECT * FROM dbo.vw_PartitionPerformance;
+    END
+    
+    -- Note: DROP_OLD would require more complex logic to merge/drop old partitions
+    -- This should be implemented carefully to avoid data loss
+END;
+GO
+
+-- ===========================
+-- PERMISSIONS AND SECURITY
+-- ===========================
+
+-- Create roles for different access levels
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'ClaimsProcessorApp' AND type = 'R')
+    CREATE ROLE ClaimsProcessorApp;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'ClaimsAnalyst' AND type = 'R')
+    CREATE ROLE ClaimsAnalyst;
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'ClaimsAdmin' AND type = 'R')
+    CREATE ROLE ClaimsAdmin;
+GO
+
+-- Grant permissions to ClaimsProcessorApp (read/write access to main tables)
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.Claims TO ClaimsProcessorApp;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.Cms1500Diagnoses TO ClaimsProcessorApp;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.Cms1500LineItems TO ClaimsProcessorApp;
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.FailedClaimDetails TO ClaimsProcessorApp;
+GRANT SELECT ON dbo.Facilities TO ClaimsProcessorApp;
+GRANT SELECT ON dbo.ClinicalDepartments TO ClaimsProcessorApp;
+GRANT SELECT ON dbo.FinancialClasses TO ClaimsProcessorApp;
+GRANT EXECUTE ON dbo.sp_ValidateFacilityClaimAssignment TO ClaimsProcessorApp;
+GRANT EXECUTE ON dbo.sp_BulkAssignClaimsToFacility TO ClaimsProcessorApp;
+GO
+
+-- Grant permissions to ClaimsAnalyst (read-only access with views)
+GRANT SELECT ON dbo.vw_ProcessingPerformance TO ClaimsAnalyst;
+GRANT SELECT ON dbo.vw_SystemHealth TO ClaimsAnalyst;
+GRANT SELECT ON dbo.vw_FacilityPerformance TO ClaimsAnalyst;
+GRANT SELECT ON dbo.vw_FailedClaimsAnalytics TO ClaimsAnalyst;
+GRANT SELECT ON dbo.vw_RealTimeDashboard TO ClaimsAnalyst;
+GRANT SELECT ON dbo.vw_CompressionStats TO ClaimsAnalyst;
+GRANT SELECT ON dbo.Claims TO ClaimsAnalyst;
+GRANT SELECT ON dbo.FailedClaimDetails TO ClaimsAnalyst;
+GO
+
+-- Grant permissions to ClaimsAdmin (full access including maintenance)
+GRANT SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo TO ClaimsAdmin;
+GRANT EXECUTE ON SCHEMA::dbo TO ClaimsAdmin;
+GO
 
 -- ===========================
 -- COMMENTS FOR DOCUMENTATION
 -- ===========================
+EXEC sp_addextendedproperty 'MS_Description', 'Enhanced production database with columnstore indexes, partitioning, and compression for high-performance claims processing', 'SCHEMA', 'dbo';
+GO
 EXEC sp_addextendedproperty 'MS_Description', 'Main organizations table for healthcare systems', 'SCHEMA', 'dbo', 'TABLE', 'Organizations';
 GO
 EXEC sp_addextendedproperty 'MS_Description', 'Geographic or administrative regions', 'SCHEMA', 'dbo', 'TABLE', 'Regions';
@@ -748,17 +1411,29 @@ EXEC sp_addextendedproperty 'MS_Description', 'Month (1-12) when fiscal year end
 GO
 EXEC sp_addextendedproperty 'MS_Description', 'Critical Access Hospital designation (Y/N)', 'SCHEMA', 'dbo', 'TABLE', 'Facilities', 'COLUMN', 'CriticalAccess';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Standardized payer types for consistent categorization', 'SCHEMA', 'dbo', 'TABLE', 'StandardPayers';
+EXEC sp_addextendedproperty 'MS_Description', 'Partitioned claims table with page compression for optimal performance', 'SCHEMA', 'dbo', 'TABLE', 'Claims';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Hierarchical Condition Categories (HCC) types for CMS and HHS', 'SCHEMA', 'dbo', 'TABLE', 'HccTypes';
+EXEC sp_addextendedproperty 'MS_Description', 'Required for partitioning - links claim to service date partition', 'SCHEMA', 'dbo', 'TABLE', 'Claims', 'COLUMN', 'ServiceDate';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Facility-specific financial classes linking to standard payers', 'SCHEMA', 'dbo', 'TABLE', 'FinancialClasses';
+EXEC sp_addextendedproperty 'MS_Description', 'Partitioned line items table with page compression', 'SCHEMA', 'dbo', 'TABLE', 'Cms1500LineItems';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Clinical departments within facilities', 'SCHEMA', 'dbo', 'TABLE', 'ClinicalDepartments';
+EXEC sp_addextendedproperty 'MS_Description', 'Failed claims tracking for UI with optimized analytics support', 'SCHEMA', 'dbo', 'TABLE', 'FailedClaimDetails';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Production claims table with facility relationships and validation results', 'SCHEMA', 'dbo', 'TABLE', 'Claims';
+EXEC sp_addextendedproperty 'MS_Description', 'Columnstore index for high-performance analytics on claims data', 'SCHEMA', 'dbo', 'INDEX', 'IX_Claims_Analytics_Columnstore';
 GO
-EXEC sp_addextendedproperty 'MS_Description', 'Links claim to the facility where service was provided', 'SCHEMA', 'dbo', 'TABLE', 'Claims', 'COLUMN', 'FacilityId';
+EXEC sp_addextendedproperty 'MS_Description', 'Real-time performance monitoring view with key metrics', 'SCHEMA', 'dbo', 'VIEW', 'vw_ProcessingPerformance';
+GO
+EXEC sp_addextendedproperty 'MS_Description', 'Automated maintenance procedure for optimal system performance', 'SCHEMA', 'dbo', 'PROCEDURE', 'sp_AutomatedMaintenance';
 GO
 
--- End of SQL Server Production Database Schema
+PRINT 'Enhanced SQL Server Production Database Schema created successfully with:';
+PRINT '- Columnstore indexes for analytics performance';
+PRINT '- Table partitioning by service date';
+PRINT '- Row/Page compression on all tables';
+PRINT '- Performance monitoring views';
+PRINT '- Automated maintenance procedures';
+PRINT '- Real-time dashboard views';
+PRINT '- System alerts and health monitoring';
+GO
+
+-- End of Enhanced SQL Server Production Database Schema
