@@ -8,8 +8,8 @@ environment:
   name: "${EDI_ENV:-development}" # development, staging, production
   region: "${EDI_REGION:-us-east-1}"
   instance_id: "${EDI_INSTANCE_ID:-edi-proc-001}"
-  debug_mode: "${EDI_DEBUG:-false}"
-  log_sensitive_data: false # Never log PII/PHI in production
+  debug_mode: "${EDI_DEBUG:-false}" # Should be false in production
+  log_sensitive_data: false # CRITICAL: Must be false in production to prevent PII/PHI in logs
 
 # Database Configurations
 # -----------------------
@@ -19,42 +19,43 @@ postgres_staging:
   port: "${PG_PORT:-5432}"
   database: "${PG_DATABASE:-edi_staging}"
   user: "${PG_USER:-postgres}"
-  password: "${PG_PASSWORD:-admin}"
+  password: "${PG_PASSWORD:-admin}" # Use environment variables for passwords in production
   
   # Connection Pool Settings
-  pool_size: "${PG_POOL_SIZE:-15}" # Increased for production load
+  pool_size: "${PG_POOL_SIZE:-20}" # Increased for production load
   max_overflow: "${PG_MAX_OVERFLOW:-30}"
   pool_timeout: 30 # Seconds to wait for connection
   pool_recycle: 1800 # Recycle connections every 30 minutes
-  pool_pre_ping: true # Enable connection health checks
+  pool_pre_ping: true # Enable connection health checks before handing out a connection
   
   # Performance Settings
-  connect_timeout: 10
-  statement_timeout: 300000 # 5 minutes in milliseconds
-  idle_in_transaction_session_timeout: 60000 # 1 minute
+  connect_timeout: 10 # Seconds for establishing a new raw connection
+  statement_timeout: 300000 # 5 minutes in milliseconds for individual statements
+  idle_in_transaction_session_timeout: 60000 # 1 minute for transactions idle with uncommitted work
   
-  # Query Optimization
-  default_isolation_level: "READ_COMMITTED"
-  autocommit: false
-  echo_sql: "${PG_ECHO_SQL:-false}" # Set to true for query debugging
+  # Query Optimization & Indexing (Placeholders for strategies, actual execution is in SQL scripts)
+  indexing_strategy: # General strategies, specific indexes are in .sql files
+    apply_on_startup: false # Whether the app attempts to create/check indexes (generally false, handled by DBAs/migrations)
+    concurrent_creation_preferred: true # For PostgreSQL, prefer CREATE INDEX CONCURRENTLY
+    regular_maintenance_job_enabled: true # For vacuum, analyze, reindex on PG
   
   # SSL Configuration
-  ssl_mode: "${PG_SSL_MODE:-prefer}" # require, prefer, disable
+  ssl_mode: "${PG_SSL_MODE:-prefer}" # Should be 'require' or 'verify-full' in production
   ssl_cert: "${PG_SSL_CERT:-}"
   ssl_key: "${PG_SSL_KEY:-}"
   ssl_ca: "${PG_SSL_CA:-}"
 
 # SQL Server connection (Production Database)
 sql_server_production:
-  driver: "${MSSQL_DRIVER:-{ODBC Driver 17 for SQL Server}}"
+  driver: "${MSSQL_DRIVER:-{ODBC Driver 17 for SQL Server}}" # Ensure driver is available
   server: "${MSSQL_SERVER:-localhost\\SQLEXPRESS}"
   database: "${MSSQL_DATABASE:-edi_production}"
-  user: "${MSSQL_USER:-sa}"
-  password: "${MSSQL_PASSWORD:-ClearToFly1}"
-  trusted_connection: "${MSSQL_TRUSTED_CONNECTION:-yes}"
+  user: "${MSSQL_USER:-sa}" # Use environment variables
+  password: "${MSSQL_PASSWORD:-ClearToFly1}" # Use environment variables
+  trusted_connection: "${MSSQL_TRUSTED_CONNECTION:-yes}" # 'yes' or 'no'
   
   # Connection Pool Settings
-  pool_size: "${MSSQL_POOL_SIZE:-15}"
+  pool_size: "${MSSQL_POOL_SIZE:-20}"
   max_overflow: "${MSSQL_MAX_OVERFLOW:-30}"
   pool_timeout: 30
   pool_recycle: 1800
@@ -62,489 +63,325 @@ sql_server_production:
   
   # Performance Settings
   connect_timeout: 15
-  command_timeout: 300 # 5 minutes
+  command_timeout: 300 # 5 minutes for individual commands
   
+  # Query Optimization & Indexing
+  indexing_strategy:
+    apply_on_startup: false
+    online_rebuild_preferred: true # For SQL Server Enterprise
+    regular_maintenance_job_enabled: true # For index rebuilds, update statistics on SQL Server
+    
   # Additional Connection Parameters
-  mars_connection: true # Multiple Active Result Sets
-  encrypt: "${MSSQL_ENCRYPT:-yes}"
-  trust_server_certificate: "${MSSQL_TRUST_CERT:-no}"
+  mars_connection: true # Multiple Active Result Sets, if needed
+  encrypt: "${MSSQL_ENCRYPT:-yes}" # Should be 'yes' in production
+  trust_server_certificate: "${MSSQL_TRUST_CERT:-no}" # Should be 'no' in production, use proper certs
 
 # Processing Parameters
 # ---------------------
 processing:
   # Batch Processing
-  batch_size: "${PROC_BATCH_SIZE:-2000}" # Optimized for 6,667 records/second target
-  max_concurrent_batches: "${PROC_MAX_CONCURRENT:-4}"
+  batch_size: "${PROC_BATCH_SIZE:-2000}" 
+  max_concurrent_batches: "${PROC_MAX_CONCURRENT:-4}" # Max number of edi_files or large batches to process in parallel
   batch_timeout_seconds: 900 # 15 minutes
   
+  # Pipeline specific (for OptimizedPipelineProcessor in batch_handler.py)
+  pipeline_max_queue_size: "${PIPELINE_QUEUE_SIZE:-4000}" # Max items in inter-stage queues
+  queue_high_watermark_factor: 0.85 # Backpressure when queue is 85% full
+  queue_low_watermark_factor: 0.25  # Factor for scaling down decisions
+  min_cpu_workers: "${MIN_CPU_WORKERS:-2}"
+  max_cpu_workers: "${MAX_CPU_WORKERS:-8}"
+  min_io_workers: "${MIN_IO_WORKERS:-4}"
+  max_io_workers: "${MAX_IO_WORKERS:-16}"
+
   # Performance Targets
-  target_throughput_per_second: 6667 # 100,000 records in 15 seconds
-  max_processing_time_per_claim_ms: 150 # Maximum time per claim in milliseconds
-  
-  # Threading and Concurrency
-  max_worker_threads: "${PROC_MAX_WORKERS:-16}"
-  io_thread_pool_size: "${PROC_IO_THREADS:-8}"
-  cpu_thread_pool_size: "${PROC_CPU_THREADS:-4}"
+  target_throughput_claims_per_sec: "${TARGET_THROUGHPUT:-6667}"
+  max_processing_time_per_claim_ms: 150 
   
   # Reimbursement Calculation
   reimbursement_conversion_factor: "${REIMB_CONVERSION_FACTOR:-36.04}"
   rvu_calculation_timeout_ms: 100
   
-  # Retry Configuration
-  max_retries_edi_parsing: "${PROC_MAX_RETRIES:-3}"
-  retry_delay_seconds: [1, 5, 15] # Exponential backoff
-  max_retry_attempts_per_claim: 3
-  dead_letter_queue_enabled: true
+  # Retry Configuration for individual operations (e.g., within a claim's processing)
+  max_retries_edi_parsing: "${PROC_MAX_RETRIES_EDI:-3}"
+  retry_delay_seconds_edi: [1, 5, 15] # Exponential backoff for EDI parsing retries
+  max_retry_attempts_per_claim_stage: 3 # General retries for a claim failing a specific stage
   
-  # Memory Management
-  max_memory_usage_mb: "${PROC_MAX_MEMORY:-4096}"
-  gc_threshold_mb: 3072 # Trigger garbage collection at 75% of max
-  
-  # Circuit Breaker Settings
-  circuit_breaker:
-    failure_threshold: 50 # Number of failures before opening circuit
-    recovery_timeout: 300 # Seconds before attempting to close circuit
-    half_open_max_calls: 10 # Max calls in half-open state
+  # Memory Management (Application level, not JVM specific if Python)
+  max_memory_usage_mb_alert_threshold: "${PROC_MAX_MEMORY_ALERT:-3072}" # e.g., 3GB before alerting
+  # gc_threshold_mb: 3072 # Not directly applicable to Python's GC like Java's
 
 # Machine Learning Model Configuration
 # -----------------------------------
 ml_model:
-  path: "${ML_MODEL_PATH:-ml_model/model.pkl}"
+  model_directory: "ml_model/versions" # Base directory where versioned models are stored
+  model_filename: "model.pkl" # Default model filename within a version directory
+  preprocessor_filename: "preprocessor.pkl" # If a separate preprocessor is saved
+  metadata_filename: "model_metadata.json" # To store info about the model version
   
-  # Model Performance
-  prediction_timeout_ms: "${ML_TIMEOUT:-200}"
-  batch_prediction_size: 100 # Process multiple claims in one ML call
-  model_cache_size: 1 # Number of models to keep in memory
+  # Active model selection (e.g., latest, specific version)
+  active_model_version: "latest" # or specify a version like "filter_predictor_20250605_103000"
   
-  # Feature Engineering
-  feature_cache_enabled: true
-  feature_cache_ttl_seconds: 3600
+  # Prediction parameters
+  prediction_confidence_threshold: "${ML_CONFIDENCE_THRESHOLD:-0.80}" # Threshold for accepting ML prediction
+  fallback_rules_on_low_confidence: true # If true, use RulesEngine outcome if ML confidence is low
   
-  # Prediction Thresholds
-  filter_prediction_threshold: "${ML_THRESHOLD:-0.7}"
-  confidence_threshold_warning: 0.5 # Log warning if confidence below this
-  fallback_to_rules_threshold: 0.3 # Use rules engine if ML confidence too low
+  # Feature engineering config (example, structure depends on your needs)
+  feature_engineering:
+    numerical_features: ['total_charge_amount', 'patient_age', 'num_diagnoses', 'num_line_items']
+    categorical_features: ['facility_type_code', 'payer_category_code'] # Example
+    target_column: 'target_filter_id' # Name of the target column in training data
+    # use_scaler: true # Example flag
+    # use_encoder: true # Example flag
+
+  # Model Performance & Monitoring
+  prediction_timeout_ms: "${ML_TIMEOUT:-250}"
+  batch_prediction_size: 100 
+  model_cache_size: 2 # Number of model versions to keep in memory (e.g., current and previous)
   
-  # Model Monitoring
-  prediction_logging_enabled: true
-  model_drift_detection_enabled: true
-  performance_metrics_interval_seconds: 300
+  # Training specific paths (can be overridden by CLI args in train_model.py)
+  training_data_path: "data/ml_training_data/claims_with_filters.csv"
+  test_split_ratio: 0.2
   
-  # A/B Testing
-  ab_testing_enabled: "${ML_AB_TESTING:-false}"
-  champion_model_percentage: 90 # Percentage of traffic to champion model
-  challenger_model_path: "${ML_CHALLENGER_PATH:-}"
+  # Model parameters for training (example for RandomForest)
+  model_params:
+    n_estimators: 150
+    max_depth: 20
+    min_samples_split: 5
+    min_samples_leaf: 3
+    class_weight: 'balanced_subsample'
+    random_state: 42
 
 # File Paths and Storage
 # ---------------------
 file_paths:
-  # Core Data Files
   rvu_data_csv: "${RVU_DATA_PATH:-data/rvu_data/rvu_table.csv}"
-  sample_edi_claims_dir: "${EDI_SAMPLE_DIR:-data/sample_edi_claims/}"
+  sample_edi_claims_dir: "${EDI_SAMPLE_DIR:-data/sample_edi_claims/}" # For testing/dev
   
-  # Processing Directories
+  # Processing Directories (ensure permissions are correct)
   edi_input_dir: "${EDI_INPUT_DIR:-data/edi_input/}"
-  edi_processing_dir: "${EDI_PROCESSING_DIR:-data/edi_processing/}"
-  edi_processed_dir: "${EDI_PROCESSED_DIR:-data/edi_processed/}"
-  edi_error_dir: "${EDI_ERROR_DIR:-data/edi_error/}"
+  edi_processing_dir: "${EDI_PROCESSING_DIR:-data/edi_processing/}" # For files currently being parsed
+  edi_processed_dir: "${EDI_PROCESSED_DIR:-data/edi_processed/}" # Successfully parsed files archive
+  edi_error_dir: "${EDI_ERROR_DIR:-data/edi_error/}" # Files that failed parsing catastrophically
   
-  # Archive and Backup
-  archive_dir: "${ARCHIVE_DIR:-data/archive/}"
-  backup_dir: "${BACKUP_DIR:-data/backup/}"
-  
-  # Logs and Monitoring
   log_dir: "${LOG_DIR:-logs/}"
-  metrics_dir: "${METRICS_DIR:-metrics/}"
-  health_check_dir: "${HEALTH_DIR:-health/}"
-  
-  # Temporary and Cache
-  temp_dir: "${TEMP_DIR:-tmp/}"
-  cache_dir: "${CACHE_DIR:-cache/}"
+  metrics_dir: "${METRICS_DIR:-metrics/}" # For exported metrics files
+  health_check_dir: "${HEALTH_DIR:-health/}" # For health check status files if any
 
-# Logging Configuration
+# Logging Configuration (Referenced by logging_config.py)
 # ---------------------
 logging:
-  # Log Levels by Environment
   level: "${LOG_LEVEL:-INFO}" # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  environment_overrides:
-    development: "DEBUG"
-    staging: "INFO"
-    production: "WARNING"
+  structured: true # Whether to use JSON structured logging (via python-json-logger)
+  console_json: false # If console output should also be JSON (can be noisy for dev)
   
-  # Log Files
-  app_log_file: "${LOG_DIR:-logs/}app.log"
-  audit_log_file: "${LOG_DIR:-logs/}audit.log"
-  error_log_file: "${LOG_DIR:-logs/}error.log"
-  performance_log_file: "${LOG_DIR:-logs/}performance.log"
-  security_log_file: "${LOG_DIR:-logs/}security.log"
-  
-  # Log Format and Rotation
   log_format: "%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(message)s"
-  detailed_format: "%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(pathname)s:%(lineno)d - %(funcName)s - %(message)s"
+  # detailed_format: "%(asctime)s - %(name)s - %(levelname)s - %(correlation_id)s - %(pathname)s:%(lineno)d - %(funcName)s - %(message)s"
+  
+  log_dir: "${LOG_DIR:-logs/}" # Redundant with file_paths.log_dir but kept for explicitness if logging_config uses it directly
+  app_log_file: "app.log" # Will be combined with log_dir
+  error_log_file: "error.log"
+  performance_log_file: "performance.log" # For detailed performance timings
   
   # File Rotation Settings
   max_bytes: "${LOG_MAX_BYTES:-20971520}" # 20MB
   backup_count: "${LOG_BACKUP_COUNT:-10}"
-  rotation_when: "midnight" # daily rotation
-  rotation_interval: 1
   
-  # Structured Logging
-  json_format: "${LOG_JSON_FORMAT:-false}"
-  include_stack_trace: true
-  
-  # Log Filtering
-  exclude_health_checks: true
-  exclude_static_files: true
-  rate_limit_enabled: true
-  rate_limit_burst: 1000
-  
-  # External Log Shipping
-  external_logging:
-    enabled: "${EXT_LOG_ENABLED:-false}"
-    endpoint: "${EXT_LOG_ENDPOINT:-}"
-    api_key: "${EXT_LOG_API_KEY:-}"
-    buffer_size: 1000
-    flush_interval_seconds: 30
+  # SQLAlchemy logging level
+  sqlalchemy_level: "WARNING" # Set to INFO or DEBUG for query logging
 
-# API Configuration
+  # Audit Logging Specifics (NEW SECTION)
+  audit_logging:
+    enabled: true
+    audit_log_file: "audit.log" # Will be combined with log_dir
+    log_level: "INFO" # Audit logs should typically capture all relevant events
+    max_bytes: "${AUDIT_LOG_MAX_BYTES:-52428800}" # 50MB for audit
+    backup_count: "${AUDIT_LOG_BACKUP_COUNT:-20}"
+    # Fields to include in audit logs (example, actual fields depend on implementation in logging_config.py)
+    include_user_id: true
+    include_ip_address: false # Be careful with PII in audit logs if IP is considered PII
+    include_resource_id: true
+    include_action_details: true
+    log_data_modifications: # Granular control over logging data changes
+      staging_db: true
+      production_db: true
+      failed_claims_db: true
+
+# Error Handling Configuration (NEW/ENHANCED SECTION)
+# --------------------------
+error_handling:
+  # Circuit Breaker defaults (can be overridden per component if needed)
+  circuit_breaker:
+    failure_threshold: 5 # Number of failures before opening circuit
+    recovery_timeout_seconds: 60 # Seconds before attempting to close circuit (HALF_OPEN state)
+    success_threshold_to_close: 3 # Consecutive successes in HALF_OPEN to close circuit
+
+  # Retry defaults for operations (can be overridden)
+  default_max_retries: 3
+  default_retry_delay_seconds: 2
+  default_retry_backoff_factor: 2.0 # Multiplier for exponential backoff
+
+  # Dead Letter Queue (DLQ) for permanently failed items (conceptual, requires implementation)
+  dlq:
+    enabled: false
+    type: "file" # or "database_table", "message_queue"
+    file_path: "${DLQ_PATH:-data/dead_letter_queue/failed_items.jsonl}"
+    # db_table_name: "staging.dead_letter_items" # Example if DB based
+
+  # Error categorization and reporting (for UI or analysis)
+  report_detailed_stack_traces_in_api: false # Should be false in production for security
+  error_categories_for_ui_filter: # List of ErrorCategory enum values (from error_handler.py)
+    - "Validation"
+    - "Parsing"
+    - "Database"
+    - "MachineLearning"
+    - "Configuration"
+    - "ExternalService"
+  
+  # Automated recovery strategies (flags to enable/disable specific ones)
+  auto_recovery:
+    db_reconnect_enabled: true
+    cache_refresh_enabled: true
+    ml_model_reload_enabled: true
+
+# API Configuration (Referenced by api/main.py)
 # ----------------
 api:
   host: "${API_HOST:-0.0.0.0}"
   port: "${API_PORT:-8000}"
+  workers: "${API_WORKERS:-4}" # Number of Uvicorn worker processes (if using Gunicorn directly, not Uvicorn programmatic)
   
-  # Performance Settings
-  workers: "${API_WORKERS:-4}" # Number of worker processes
-  max_connections: "${API_MAX_CONN:-1000}"
-  keep_alive_timeout: 5
-  graceful_timeout: 30
+  # Rate Limiting (requires slowapi)
+  rate_limiting_enabled: true
+  default_rate_limit: "1000/minute" # Default for most endpoints
+  admin_rate_limit: "100/hour"    # Stricter for sensitive/admin endpoints
   
-  # Request Limits
-  max_request_size_mb: 50
-  request_timeout_seconds: 300
-  rate_limit_per_minute: 1000
-  
-  # CORS Configuration
-  cors_origins: "${API_CORS_ORIGINS:-*}"
-  cors_allow_credentials: true
-  cors_allow_methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-  cors_allow_headers: ["*"]
-  
-  # Security
-  api_key_required: "${API_KEY_REQUIRED:-false}"
-  api_key_header: "X-API-Key"
-  jwt_secret_key: "${JWT_SECRET:-change_me_in_production}"
-  jwt_algorithm: "HS256"
-  jwt_expiration_hours: 24
-  
-  # Health Checks
-  health_check_endpoint: "/health"
-  readiness_endpoint: "/ready"
-  metrics_endpoint: "/metrics"
+  # CORS
+  cors_origins: ["http://localhost:3000", "http://127.0.0.1:3000"] # Example for a React frontend on port 3000
+  # In production, list specific frontend domains. Use "*" with caution.
 
-# Caching Configuration
+  # JWT/Authentication (example placeholders)
+  jwt_secret_key: "${API_JWT_SECRET:-your-very-secret-key-keep-safe}" # MUST be changed and secured
+  jwt_algorithm: "HS256"
+  jwt_token_expire_minutes: 60
+
+# Caching Configuration (Referenced by caching.py and api/main.py)
 # --------------------
 caching:
-  # RVU Data Caching
-  rvu_cache_type: "${CACHE_RVU_TYPE:-memory_mapped}" # memory_mapped, in_memory, redis
-  rvu_cache_ttl_seconds: 3600
-  rvu_cache_max_size_mb: 512
+  rvu_cache_type: "${RVU_CACHE_TYPE:-in_memory}" # "memory_mapped", "in_memory", "redis"
+  rvu_cache_ttl_seconds: 3600 # 1 hour
+  enable_cache_warming: true # For RVU and other critical caches on startup
+  warming_batch_size: 1000 # Number of items to warm (e.g., common RVU codes)
+
+  # API Response Caching (if using Redis for this)
+  api_cache_enabled: "${API_CACHE_ENABLED:-true}" # General switch for API response caching
+  api_cache_ttl_seconds: 300 # Default TTL for API responses (5 minutes)
   
-  # Redis Configuration (if using Redis caching)
+  # Redis Configuration (if used for RVU or API cache)
   redis:
-    enabled: "${REDIS_ENABLED:-false}"
+    enabled: "${REDIS_ENABLED_FOR_CACHE:-false}"
     host: "${REDIS_HOST:-localhost}"
     port: "${REDIS_PORT:-6379}"
-    password: "${REDIS_PASSWORD:-}"
-    db: "${REDIS_DB:-0}"
-    max_connections: 20
-    health_check_interval: 30
-    
-  # Application Caching
-  facility_cache_ttl_seconds: 1800 # 30 minutes
-  financial_class_cache_ttl_seconds: 1800
-  rules_cache_ttl_seconds: 3600
-  
-  # Memory Cache Settings
-  max_cache_size_mb: "${CACHE_MAX_SIZE:-1024}"
-  cache_cleanup_interval_seconds: 300
-  cache_statistics_enabled: true
+    password: "${REDIS_PASSWORD:-}" # Use env var
+    db_api_cache: 0 # Redis DB number for API cache
+    db_app_cache: 1 # Redis DB number for other app caches (e.g., RVU if type is redis)
 
-# Security Configuration
+# Security Configuration (Referenced by security.py)
 # ----------------------
 security:
-  # Encryption
-  encryption_algorithm: "AES-256-GCM"
-  key_rotation_days: 90
-  pii_phi_encryption_key: "${ENCRYPTION_KEY:-change_me_securely}"
-  data_classification_enabled: true
+  pii_phi_encryption_key_env_var: "EDI_PROC_ENCRYPTION_KEY" # Name of ENV VAR holding the actual key
+  # The value of EDI_PROC_ENCRYPTION_KEY should be a securely generated 32 url-safe base64-encoded bytes for Fernet.
+  # Example (generate once, store securely): Fernet.generate_key().decode()
+  # DO NOT COMMIT THE ACTUAL KEY HERE.
   
-  # Hashing
-  hashing_algorithm: "SHA-256"
-  hashing_salt: "${HASH_SALT:-change_me_securely}"
-  password_hash_rounds: 12
-  
-  # Access Control
-  rbac_enabled: "${RBAC_ENABLED:-true}"
-  session_timeout_minutes: 60
-  max_failed_login_attempts: 5
-  account_lockout_duration_minutes: 30
-  
-  # Audit and Compliance
-  audit_all_data_access: true
-  audit_retention_days: 2555 # 7 years for healthcare compliance
-  pii_phi_access_logging: true
-  hipaa_compliance_mode: true
-  
-  # Network Security
-  allowed_ips: "${ALLOWED_IPS:-}"
-  ip_whitelist_enabled: false
-  ssl_required: "${SSL_REQUIRED:-true}"
-  
-  # Data Masking
-  auto_mask_pii: true
-  mask_patterns:
-    ssn: "***-**-####"
-    phone: "***-***-####"
-    email: "***@***.***"
+  hashing_salt_env_var: "EDI_PROC_HASH_SALT" # ENV VAR for hashing salt
+  # Example: os.urandom(16).hex()
 
-# Services Configuration
-# ----------------------
-services:
-  # Claim Repair Service
-  claim_repair:
-    enabled: "${CLAIM_REPAIR_ENABLED:-true}"
-    ai_model_endpoint: "${CLAIM_REPAIR_ENDPOINT:-}"
-    timeout_seconds: 30
-    max_suggestions: 5
-    confidence_threshold: 0.6
-    
-  # Notification Service
-  notifications:
-    enabled: "${NOTIFICATIONS_ENABLED:-true}"
-    email_enabled: true
-    slack_enabled: "${SLACK_ENABLED:-false}"
-    webhook_enabled: false
-    
-    email:
-      smtp_server: "${SMTP_SERVER:-}"
-      smtp_port: "${SMTP_PORT:-587}"
-      username: "${SMTP_USER:-}"
-      password: "${SMTP_PASS:-}"
-      use_tls: true
-      
-    slack:
-      webhook_url: "${SLACK_WEBHOOK:-}"
-      channel: "${SLACK_CHANNEL:-#alerts}"
-      
-  # External Integrations
-  external_apis:
-    eligibility_check:
-      enabled: false
-      endpoint: "${ELIGIBILITY_API:-}"
-      timeout_seconds: 10
-      
-    provider_directory:
-      enabled: false
-      endpoint: "${PROVIDER_API:-}"
-      timeout_seconds: 15
+  # Data masking settings (placeholders, actual patterns in security.py)
+  mask_pii_in_logs: true # General flag, specific log_sensitive_data above is more critical
+  mask_pii_in_failed_claim_snapshot: true
 
-# Performance and Optimization
-# ----------------------------
-performance:
-  # Database Optimization
-  enable_read_write_splitting: "${ENABLE_READ_WRITE_SPLIT:-false}"
-  postgres_read_replica_host: "${PG_READ_HOST:-}"
-  sql_server_read_replica_server: "${MSSQL_READ_SERVER:-}"
-  
-  # Connection Management
-  connection_pool_warming: true
-  warm_connections_count: 5
-  connection_health_check_interval: 60
-  
-  # Query Optimization
-  query_cache_enabled: true
-  query_cache_size_mb: 256
-  slow_query_threshold_ms: 1000
-  query_statistics_enabled: true
-  
-  # Memory Management
-  max_heap_size_mb: "${MAX_HEAP_SIZE:-8192}"
-  gc_strategy: "G1GC" # or "ParallelGC", "ZGC"
-  memory_monitoring_enabled: true
-  
-  # I/O Optimization
-  async_io_enabled: true
-  io_queue_size: 1000
-  io_timeout_seconds: 30
-  
-  # Compression
-  response_compression: true
-  log_compression: true
-  backup_compression: true
-
-# Monitoring and Alerting
+# Monitoring and Alerting (Referenced by monitoring/* and alert_manager.py)
 # -----------------------
 monitoring:
-  # Health Checks
-  health_check_enabled: true
-  health_check_interval_seconds: 30
-  health_check_timeout_seconds: 10
-  
-  # Metrics Collection
-  metrics_enabled: "${METRICS_ENABLED:-true}"
-  metrics_port: "${METRICS_PORT:-9090}"
-  metrics_path: "/metrics"
-  
-  # Prometheus Integration
-  prometheus:
-    enabled: "${PROMETHEUS_ENABLED:-false}"
-    job_name: "edi-claims-processor"
-    scrape_interval: "15s"
-    
-  # Application Metrics
-  track_processing_time: true
-  track_throughput: true
-  track_error_rates: true
-  track_memory_usage: true
-  track_database_performance: true
-  
-  # Custom Metrics
-  business_metrics:
-    claims_processed_per_hour: true
-    average_reimbursement_amount: true
-    validation_failure_rate: true
-    ml_prediction_accuracy: true
-    
-  # Alerting Rules
-  alerts:
-    # Performance Alerts
-    high_error_rate:
-      threshold: 5 # percent
-      duration_minutes: 5
-      severity: "critical"
-      
-    slow_processing:
-      threshold_ms: 10000 # per claim
-      duration_minutes: 10
-      severity: "warning"
-      
-    high_memory_usage:
-      threshold_percent: 85
-      duration_minutes: 5
-      severity: "warning"
-      
-    database_connection_failures:
-      threshold: 10 # count
-      duration_minutes: 2
-      severity: "critical"
-      
-    # Business Alerts
-    high_validation_failure_rate:
-      threshold_percent: 20
-      duration_minutes: 15
-      severity: "warning"
-      
-    throughput_below_target:
-      threshold_per_second: 5000
-      duration_minutes: 10
-      severity: "critical"
+  system_monitoring_enabled: true
+  system_monitor_interval_seconds: 60
+  connection_metrics_logging_enabled: true # For EnhancedConnectionManager
+  connection_metrics_log_interval_seconds: 120
 
-# Disaster Recovery and Backup
-# ----------------------------
-disaster_recovery:
-  # Backup Configuration
-  backup_enabled: "${BACKUP_ENABLED:-true}"
-  backup_schedule: "0 2 * * *" # Daily at 2 AM
-  backup_retention_days: 30
-  
-  # Database Backups
-  postgres_backup_enabled: true
-  postgres_backup_command: "pg_dump"
-  sqlserver_backup_enabled: true
-  
-  # File Backups
-  edi_files_backup_enabled: true
-  logs_backup_enabled: true
-  config_backup_enabled: true
-  
-  # Recovery Testing
-  recovery_test_schedule: "0 3 * * SUN" # Weekly on Sunday at 3 AM
-  recovery_test_enabled: false
-  
-  # High Availability
-  ha_enabled: "${HA_ENABLED:-false}"
-  failover_timeout_seconds: 60
-  cluster_nodes: "${CLUSTER_NODES:-}"
+  # Health check thresholds used by health_checker.py
+  db_timeout_threshold_ms: 5000
+  memory_threshold_percent: 85
+  disk_threshold_percent: 90
+  cpu_threshold_percent: 80
 
-# Development and Testing
-# -----------------------
-development:
-  # Test Data
-  generate_test_data: "${GEN_TEST_DATA:-false}"
-  test_data_size: 1000
+alerting:
+  notifications_enabled: "${ALERT_NOTIFICATIONS_ENABLED:-true}" # Master switch for all alerts
+  check_interval_seconds: 60 # How often AlertManager checks conditions
+  auto_start_monitoring: true # If AlertManager starts its checking loop on init
+
+  email:
+    enabled: "${ALERT_EMAIL_ENABLED:-false}"
+    smtp_server: "${SMTP_SERVER:-}"
+    smtp_port: "${SMTP_PORT:-587}"
+    username: "${SMTP_USER:-}"
+    password: "${SMTP_PASS_ENV_VAR:-SMTP_PASSWORD}" # Name of ENV VAR for SMTP pass
+    from_email: "edi-alerts@example.com"
+    to_emails: ["admin1@example.com", "ops-team@example.com"] # List of recipients
   
-  # Debugging
-  enable_sql_echo: false
-  enable_request_logging: true
-  enable_performance_profiling: false
+  webhook: # For Slack, Teams, PagerDuty etc.
+    enabled: "${ALERT_WEBHOOK_ENABLED:-false}"
+    url: "${ALERT_WEBHOOK_URL:-}"
+    method: "POST" # or PUT
+    headers: # Optional custom headers
+      Content-Type: "application/json"
+      # Authorization: "Bearer ${PAGERDUTY_API_KEY_ENV_VAR}"
+
+# UI Services Configuration (NEW SECTION)
+# -------------------------
+ui_services:
+  failed_claims_ui:
+    # Settings relevant to how the backend API supports the Failed Claims UI
+    default_page_size: 50
+    max_page_size: 200
+    # Real-time sync status indicators (conceptual, depends on implementation)
+    # The API endpoints in sqlserver_handler.py will query views like dbo.vw_RealTimeDashboard
+    # No direct config here unless the UI itself needs specific backend polling intervals etc.
+    sync_status_refresh_interval_seconds_client: 60 # Hint for client-side polling
+
+  analytics_dashboard:
+    # Settings for data feeding the analytics dashboard
+    default_timespan_days: 30
+    # Data aggregation levels might be configured here if backend needs hints
+    # e.g., aggregate_by: ["ProcessingStage", "FacilityId", "ErrorCodePrefix"]
+    # Actual queries using these are in sqlserver_handler.py
+
+# Performance specific configurations (can consolidate some from above)
+# ----------------------------------
+performance:
+  enable_read_write_splitting: "${DB_READ_WRITE_SPLIT_ENABLED:-true}"
+  postgres_read_replica_host: "${PG_READ_REPLICA_HOST:-}" # e.g., "pg-replica.example.com"
+  sql_server_read_replica_server: "${MSSQL_READ_REPLICA_SERVER:-}" # e.g., "sql-replica.example.com\\SQLEXPRESS"
+
+  # Default connection pool settings if not overridden per DB
+  default_pool_size: 15
+  default_max_overflow: 25
+  default_pool_timeout: 30
+  default_pool_recycle: 1800
+  default_connect_timeout: 10
   
-  # Mock Services
-  mock_external_apis: "${MOCK_APIS:-false}"
-  mock_ml_predictions: false
-  
-# Feature Flags
+  # Default health check and circuit breaker settings
+  default_health_check_interval_seconds: 30
+  default_max_retries_on_failure: 3
+  default_cb_failure_threshold: 5
+  default_cb_recovery_timeout_seconds: 60
+
+  # Auto-scaling for PipelineProcessor (batch_handler.py)
+  auto_scale_check_interval_seconds: 15
+  metrics_report_interval_seconds: 60 # How often pipeline reports its metrics
+
+# Feature Flags (can be used to toggle functionality without redeploying)
 # -------------
 feature_flags:
-  # Processing Features
-  parallel_batch_processing: "${FF_PARALLEL_BATCH:-true}"
-  advanced_ml_features: "${FF_ADVANCED_ML:-false}"
-  real_time_validation: "${FF_REALTIME_VAL:-true}"
-  
-  # UI Features
-  analytics_dashboard: "${FF_ANALYTICS:-true}"
-  claim_repair_suggestions: "${FF_CLAIM_REPAIR:-true}"
-  bulk_claim_operations: "${FF_BULK_OPS:-true}"
-  
-  # Integration Features
-  external_api_integration: "${FF_EXT_API:-false}"
-  webhook_notifications: "${FF_WEBHOOKS:-false}"
-
-# Environment-Specific Overrides
-# ------------------------------
-environments:
-  development:
-    logging:
-      level: "DEBUG"
-    processing:
-      batch_size: 100
-    performance:
-      enable_read_write_splitting: false
-    monitoring:
-      metrics_enabled: false
-      
-  staging:
-    logging:
-      level: "INFO"
-    processing:
-      batch_size: 1000
-    performance:
-      enable_read_write_splitting: true
-    monitoring:
-      metrics_enabled: true
-      
-  production:
-    logging:
-      level: "WARNING"
-    processing:
-      batch_size: 2000
-    performance:
-      enable_read_write_splitting: true
-    monitoring:
-      metrics_enabled: true
-      alerts:
-        enabled: true
-
-file_paths:
-  rvu_data_csv: "data/rvu_data/rvu_table.csv"
-  sample_edi_claims_dir: "data/sample_edi_claims/"
-  log_dir: "logs/"
+  use_enhanced_ml_model_v2: false
+  enable_experimental_validation_rules: false
+  enable_realtime_dashboard_api_caching: true # Example flag
