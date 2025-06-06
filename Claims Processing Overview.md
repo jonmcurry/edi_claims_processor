@@ -23,7 +23,7 @@ This project builds a high-performance Electronic Data Interchange (EDI) CMS 150
 - Class files need to be separated for easier maintenance, troubleshooting
 - Add async batch processing optimization: Your current batch processing could benefit from pipeline parallelization where stages overlap
 - Implement connection pool warming: Pre-create database connections during startup
-- Add memory-mapped file caching for RVU data to reduce disk I/O
+- Add in-memory caching for RVU data fetched from SQL Server to reduce database load
 - Consider database read replicas for heavy read operations during validation
 - Implement claim repair suggestions: AI-powered suggestions for fixing common errors
 - Enhanced categorization: More granular error categories for better UI filtering

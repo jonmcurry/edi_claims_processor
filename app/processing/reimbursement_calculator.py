@@ -109,7 +109,7 @@ class ReimbursementCalculator:
             # For now, return 0 if RVU not found.
             return Decimal("0.00"), "RVU_NOT_FOUND"
 
-    def process_claim_reimbursement(self, claim_orm_object: Any): # Type hint with StagingClaim if possible
+    def process_claim_reimbursement(self, claim_orm_object: any): # Type hint with StagingClaim if possible
         """
         Iterates through claim line items and calculates reimbursement for each.
         Updates the line items with the calculated amount (if a field exists for it).
@@ -169,53 +169,16 @@ class ReimbursementCalculator:
 
 if __name__ == '__main__':
     from app.utils.logging_config import setup_logging, set_correlation_id
+    from app.database.connection_manager import init_database_connections, dispose_engines
     
     setup_logging()
     set_correlation_id("REIMB_CALC_TEST")
 
-    # Ensure RVU cache is initialized (requires config.yaml and dummy rvu_table.csv from caching.py test)
-    if rvu_cache_instance is None or rvu_cache_instance._rvu_data is None:
-        logger.warning("RVU cache not initialized. Creating dummy RVU data for test.")
-        # Create a dummy rvu_table.csv for testing if not present from caching.py test
-        dummy_rvu_config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'config.yaml')
-        if not os.path.exists(os.path.dirname(dummy_rvu_config_path)):
-            os.makedirs(os.path.dirname(dummy_rvu_config_path), exist_ok=True)
-        
-        if not os.path.exists(dummy_rvu_config_path):
-             with open(dummy_rvu_config_path, 'w') as f:
-                yaml.dump({
-                    'processing': {'reimbursement_conversion_factor': 36.04},
-                    'caching': {'rvu_cache_type': 'in_memory'}, # or memory_mapped
-                    'file_paths': {'rvu_data_csv': 'data/rvu_data/dummy_rvu_table.csv'},
-                    'logging': {'level': 'DEBUG', 'log_dir': 'logs/', 
-                                'app_log_file': 'logs/app_test.log', 'audit_log_file': 'logs/audit_test.log'}
-                }, f)
-        
-        dummy_rvu_path = 'data/rvu_data/dummy_rvu_table.csv'
-        os.makedirs(os.path.dirname(dummy_rvu_path), exist_ok=True)
-        if not os.path.exists(dummy_rvu_path):
-            with open(dummy_rvu_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['cpt_code', 'rvu_value', 'description']) # Ensure 'rvu_value' is the key
-                writer.writerow(['99213', '1.50', 'Office visit est pt level 3'])
-                writer.writerow(['99214', '2.45', 'Office visit est pt level 4'])
-                writer.writerow(['G0008', '0.25', 'Admin of flu shot'])
-            logger.info(f"Dummy RVU data created at {dummy_rvu_path}")
-            # Attempt to re-initialize rvu_cache_instance
-            try:
-                # This is tricky as rvu_cache_instance is a module-level singleton.
-                # For a robust test, you'd mock RVUCache or ensure it can be reloaded.
-                # For this simple __main__, we rely on it being loaded now.
-                from app.utils import caching
-                import importlib
-                importlib.reload(caching) # Try to reload the module to pick up new file
-                rvu_cache_instance = caching.rvu_cache_instance
-                if rvu_cache_instance is None or rvu_cache_instance._rvu_data is None:
-                     logger.error("Failed to reload RVU cache for test after creating dummy file.")
-            except Exception as e_reload:
-                logger.error(f"Error reloading RVU cache for test: {e_reload}")
+    # This test now assumes that the database is accessible and dbo.RvuData is populated.
+    # The setup.py script is responsible for populating this data.
+    try:
+        init_database_connections()
 
-    if rvu_cache_instance and rvu_cache_instance._rvu_data is not None:
         calculator = ReimbursementCalculator()
         logger.info(f"Using Conversion Factor: {calculator.conversion_factor}")
 
@@ -240,26 +203,21 @@ if __name__ == '__main__':
                 self.cpt_code = cpt_code
                 self.units = units
                 self.line_charge_amount = line_charge_amount
-                # Add these if you want to store results on the line item ORM
-                # self.estimated_reimbursement_amount = None 
-                # self.reimbursement_calculation_status = None
 
         class MockClaim:
             def __init__(self, claim_id):
                 self.claim_id = claim_id
                 self.cms1500_line_items = []
-                # self.total_estimated_reimbursement = None
 
         mock_claim_obj = MockClaim("TEST_REIMB_001")
         mock_claim_obj.cms1500_line_items.append(MockLineItem(1, "99213", 1, Decimal("150.00")))
         mock_claim_obj.cms1500_line_items.append(MockLineItem(2, "G0008", 2, Decimal("60.00")))
         
-        # This call would ideally update the mock_claim_obj or its lines if the ORM model had fields for it.
-        # For now, it logs the total.
         calculator.process_claim_reimbursement(mock_claim_obj) 
-        # logger.info(f"Mock Claim {mock_claim_obj.claim_id} Total Estimated Reimbursement: {mock_claim_obj.total_estimated_reimbursement}")
 
-    else:
-        logger.error("RVU cache is not available. Reimbursement calculator tests cannot run properly.")
+    except Exception as e:
+        logger.error(f"Reimbursement calculator test failed: {e}", exc_info=True)
+    finally:
+        dispose_engines()
     
     logger.info("Reimbursement calculator test finished.")

@@ -27,7 +27,7 @@ POSTGRES_CONN = {
 }
 SQLSERVER_CONN = {
     "driver": "{ODBC Driver 17 for SQL Server}",
-    "server": "localhost", 
+    "server": "localhost",
     "database": "edi_production",
     "uid": "sa",
     "pwd": "ClearToFly1"
@@ -45,16 +45,16 @@ def create_postgres_database_if_not_exists():
         conn = psycopg2.connect(
             host=POSTGRES_CONN["host"],
             port=POSTGRES_CONN["port"],
-            dbname="postgres", 
+            dbname="postgres",
             user=POSTGRES_CONN["user"],
             password=POSTGRES_CONN["password"]
         )
-        conn.autocommit = True 
+        conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (POSTGRES_CONN["dbname"],))
             if not cur.fetchone():
                 print(f"Creating PostgreSQL database {POSTGRES_CONN['dbname']}...")
-                cur.execute(f"CREATE DATABASE \"{POSTGRES_CONN['dbname']}\"") 
+                cur.execute(f"CREATE DATABASE \"{POSTGRES_CONN['dbname']}\"")
                 print(f"PostgreSQL database {POSTGRES_CONN['dbname']} created.")
             else:
                 print(f"PostgreSQL database {POSTGRES_CONN['dbname']} already exists.")
@@ -71,17 +71,17 @@ def create_sqlserver_database_if_not_exists():
         conn_str_master = (
             f"DRIVER={SQLSERVER_CONN['driver']};"
             f"SERVER={SQLSERVER_CONN['server']};"
-            f"DATABASE=master;" 
+            f"DATABASE=master;"
             f"UID={SQLSERVER_CONN['uid']};"
             f"PWD={SQLSERVER_CONN['pwd']};"
-            f"TrustServerCertificate=yes;" 
+            f"TrustServerCertificate=yes;"
         )
-        conn = pyodbc.connect(conn_str_master, autocommit=True) 
+        conn = pyodbc.connect(conn_str_master, autocommit=True)
         cur = conn.cursor()
         cur.execute("SELECT name FROM sys.databases WHERE name = ?", (SQLSERVER_CONN['database'],))
         if not cur.fetchone():
             print(f"Creating SQL Server database {SQLSERVER_CONN['database']}...")
-            cur.execute(f"CREATE DATABASE [{SQLSERVER_CONN['database']}]") 
+            cur.execute(f"CREATE DATABASE [{SQLSERVER_CONN['database']}]")
             print(f"SQL Server database {SQLSERVER_CONN['database']} created.")
         else:
             print(f"SQL Server database {SQLSERVER_CONN['database']} already exists.")
@@ -113,9 +113,9 @@ def load_rvu_data_to_sql_server():
         print("Cleared existing data from dbo.RvuData.")
 
         df = pd.read_csv(RVU_DATA_CSV)
-        
+
         insert_query = "INSERT INTO dbo.RvuData (CptCode, Description, RvuValue) VALUES (?, ?, ?)"
-        
+
         data_to_insert = []
         for index, row in df.iterrows():
             # Ensure 'rvu_value' column exists and handle potential NaN
@@ -123,7 +123,7 @@ def load_rvu_data_to_sql_server():
             if pd.isna(rvu_val):
                 print(f"Warning: Skipping row for CPT {row.get('cpt_code')} due to missing rvu_value.")
                 continue
-            
+
             data_to_insert.append((
                 str(row.get('cpt_code')),
                 str(row.get('description')),
@@ -156,7 +156,7 @@ def random_date(start_date_obj, end_date_obj):
     if start_date_obj > end_date_obj:
         return end_date_obj
     delta = end_date_obj - start_date_obj
-    if delta.days < 0 : 
+    if delta.days < 0 :
         return end_date_obj
     random_days = random.randint(0, delta.days)
     return (start_date_obj + timedelta(days=random_days))
@@ -167,7 +167,7 @@ def generate_facility_framework_data(n_orgs=5, n_regions=10, n_facilities=50, n_
     facility_ids = [f"FAC{str(i).zfill(3)}" for i in range(1, n_facilities + 1)]
     financial_class_codes = [f"FC{str(i).zfill(3)}" for i in range(1, n_financial_classes + 1)]
     payer_codes = [f"PAYER{str(i).zfill(3)}" for i in range(1, n_payers + 1)]
-    department_master_ids = [i for i in range(1, n_departments + 1)] 
+    department_master_ids = [i for i in range(1, n_departments + 1)]
 
     facility_details_list = []
     for fac_id in facility_ids:
@@ -177,7 +177,7 @@ def generate_facility_framework_data(n_orgs=5, n_regions=10, n_facilities=50, n_
             "region_code": random.choice(region_codes),
             "financial_class_code": random.choice(financial_class_codes),
             "payer_code": random.choice(payer_codes),
-            "department_code": f"DEPT{str(random.choice(department_master_ids)).zfill(3)}" 
+            "department_code": f"DEPT{str(random.choice(department_master_ids)).zfill(3)}"
         })
     return organization_codes, region_codes, facility_ids, financial_class_codes, payer_codes, department_master_ids, facility_details_list
 
@@ -186,8 +186,8 @@ def generate_random_claims(facility_ids, financial_class_codes, department_ids, 
     """Generates random claim data with dates suitable for PostgreSQL partitions."""
     claims = []
     today = datetime.now().date()
-    date_range_start = today - timedelta(days=90) 
-    date_range_end = today + timedelta(days=90)   
+    date_range_start = today - timedelta(days=90)
+    date_range_end = today + timedelta(days=90)
 
     current_year = datetime.now().year
     dob_start_date = datetime(1950, 1, 1).date()
@@ -200,21 +200,21 @@ def generate_random_claims(facility_ids, financial_class_codes, department_ids, 
         if not facility_ids or not financial_class_codes or not department_ids:
             print("Warning: facility_ids, financial_class_codes, or department_ids is empty in generate_random_claims.")
             break
-        
+
         fac_id = random.choice(facility_ids)
         fc_code = random.choice(financial_class_codes)
-        dept_id = random.choice(department_ids) if department_ids else None 
-        
+        dept_id = random.choice(department_ids) if department_ids else None
+
         start_dt = random_date(date_range_start, date_range_end)
-        
+
         end_dt_offset_max = (date_range_end - start_dt).days if date_range_end > start_dt else 0
-        end_dt_offset_max = min(end_dt_offset_max, 30) 
+        end_dt_offset_max = min(end_dt_offset_max, 30)
         end_dt_offset = random.randint(0, end_dt_offset_max)
         end_dt = start_dt + timedelta(days=end_dt_offset)
 
         service_line_start_dt_max_offset = (end_dt - start_dt).days if end_dt >= start_dt else 0
         service_line_start_dt = start_dt + timedelta(days=random.randint(0, service_line_start_dt_max_offset))
-        
+
         service_line_end_dt_max_offset = (end_dt - service_line_start_dt).days if end_dt >= service_line_start_dt else 0
         service_line_end_dt = service_line_start_dt + timedelta(days=random.randint(0, service_line_end_dt_max_offset))
 
@@ -224,24 +224,24 @@ def generate_random_claims(facility_ids, financial_class_codes, department_ids, 
         claim = {
             "claim_id": random_string(12),
             "facility_id": fac_id,
-            "department_id": dept_id, 
-            "financial_class": fc_code, 
-            "patient_id": random_string(10), 
-            "patient_age": patient_age_val, 
+            "department_id": dept_id,
+            "financial_class": fc_code,
+            "patient_id": random_string(10),
+            "patient_age": patient_age_val,
             "patient_dob": random_date(dob_start_date, dob_end_date), # Key is "patient_dob"
-            "patient_sex": random.choice(['M', 'F', 'U']), 
+            "patient_sex": random.choice(['M', 'F', 'U']),
             "patient_account": random_string(10),
-            "provider_id": random_string(8), 
-            "provider_type": random.choice(["Individual", "Group", "Facility"]), 
-            "rendering_provider_npi": random_string(10) if random.choice([True, False]) else None, 
-            "place_of_service": str(random.randint(11, 99)), 
-            "start_date": start_dt, 
-            "end_date": end_dt, 
-            "total_charge_amount": total_charge_amount_val, 
-            "total_claim_charges": round(total_charge_amount_val * random.uniform(0.95, 1.05), 2), 
-            "payer_name": f"Payer_{random_string(5)}", 
-            "primary_insurance_id": random_string(15) if random.choice([True, False]) else None, 
-            "secondary_insurance_id": random_string(15) if random.choice([True, False, False]) else None, 
+            "provider_id": random_string(8),
+            "provider_type": random.choice(["Individual", "Group", "Facility"]),
+            "rendering_provider_npi": random_string(10) if random.choice([True, False]) else None,
+            "place_of_service": str(random.randint(11, 99)),
+            "start_date": start_dt,
+            "end_date": end_dt,
+            "total_charge_amount": total_charge_amount_val,
+            "total_claim_charges": round(total_charge_amount_val * random.uniform(0.95, 1.05), 2),
+            "payer_name": f"Payer_{random_string(5)}",
+            "primary_insurance_id": random_string(15) if random.choice([True, False]) else None,
+            "secondary_insurance_id": random_string(15) if random.choice([True, False, False]) else None,
             "rvu": round(random.uniform(0.5, 5.0), 2),
             "units": random.randint(1, 10)
         }
@@ -276,7 +276,7 @@ def run_sqlserver_sql(sql_path):
                 except pyodbc.Error as e:
                     print(f"Error executing SQL Server statement: {e}")
                     print(f"Failing Statement Batch (first 1000 chars):\n---\n{clean_stmt_batch[:1000]}...\n---")
-                    raise 
+                    raise
         conn.commit()
         print(f"SQL Server script {sql_path} executed successfully.")
     except FileNotFoundError:
@@ -335,7 +335,7 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
         for org_code_val in organization_codes:
             org_name_val = f"Organization {org_code_val}"
             try:
-                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.Organizations WHERE OrganizationCode = ?) INSERT INTO dbo.Organizations (OrganizationName, OrganizationCode) VALUES (?, ?)", 
+                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.Organizations WHERE OrganizationCode = ?) INSERT INTO dbo.Organizations (OrganizationName, OrganizationCode) VALUES (?, ?)",
                             org_code_val, org_name_val, org_code_val)
             except pyodbc.Error as e: print(f"Error inserting organization {org_code_val}: {e}")
         conn.commit()
@@ -344,7 +344,7 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
         for reg_code_val in region_codes:
             reg_name_val = f"Region {reg_code_val}"
             try:
-                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.Regions WHERE RegionCode = ?) INSERT INTO dbo.Regions (RegionName, RegionCode) VALUES (?, ?)", 
+                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.Regions WHERE RegionCode = ?) INSERT INTO dbo.Regions (RegionName, RegionCode) VALUES (?, ?)",
                             reg_code_val, reg_name_val, reg_code_val)
             except pyodbc.Error as e: print(f"Error inserting region {reg_code_val}: {e}")
         conn.commit()
@@ -354,18 +354,18 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
             payer_name_val = f"Payer {payer_code_val}"
             payer_category_val = "General Category"
             try:
-                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.StandardPayers WHERE StandardPayerCode = ?) INSERT INTO dbo.StandardPayers (StandardPayerCode, StandardPayerName, PayerCategory) VALUES (?, ?, ?)", 
+                cur.execute("IF NOT EXISTS (SELECT 1 FROM dbo.StandardPayers WHERE StandardPayerCode = ?) INSERT INTO dbo.StandardPayers (StandardPayerCode, StandardPayerName, PayerCategory) VALUES (?, ?, ?)",
                             payer_code_val, payer_code_val, payer_name_val, payer_category_val)
             except pyodbc.Error as e: print(f"Error inserting standard payer {payer_code_val}: {e}")
         conn.commit()
-        
+
         org_id_map = {code: cur.execute("SELECT OrganizationId FROM dbo.Organizations WHERE OrganizationCode = ?", code).fetchone()[0]
                       for code in organization_codes if cur.execute("SELECT OrganizationId FROM dbo.Organizations WHERE OrganizationCode = ?", code).fetchone()}
         reg_id_map = {code: cur.execute("SELECT RegionId FROM dbo.Regions WHERE RegionCode = ?", code).fetchone()[0]
                       for code in region_codes if cur.execute("SELECT RegionId FROM dbo.Regions WHERE RegionCode = ?", code).fetchone()}
         payer_id_map = {code: cur.execute("SELECT StandardPayerId FROM dbo.StandardPayers WHERE StandardPayerCode = ?", code).fetchone()[0]
                         for code in payer_codes_master if cur.execute("SELECT StandardPayerId FROM dbo.StandardPayers WHERE StandardPayerCode = ?", code).fetchone()}
-        
+
         print("Processing and inserting Facilities, FinancialClasses, ClinicalDepartments...")
         for fac_detail in facility_details_list:
             facility_id_val = fac_detail["facility_id"]
@@ -373,7 +373,7 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
             reg_code_fk = fac_detail["region_code"]
             financial_class_id_val = fac_detail["financial_class_code"]
             payer_code_fk_for_fc = fac_detail["payer_code"]
-            department_code_val = fac_detail["department_code"] 
+            department_code_val = fac_detail["department_code"]
             try:
                 org_db_id = org_id_map.get(org_code_fk)
                 reg_db_id = reg_id_map.get(reg_code_fk)
@@ -383,12 +383,12 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
                     continue
                 facility_name_val, facility_internal_code = f"Facility {facility_id_val}", facility_id_val
                 city_val, state_val, bed_size_val, emr_val, fac_type_val, crit_access_val = "Gen City", "XX", random.randint(50,500), "EMR X", "Non-Teaching", "N"
-                
+
                 cur.execute("""
                     IF NOT EXISTS (SELECT 1 FROM dbo.Facilities WHERE FacilityId = ?)
                     INSERT INTO dbo.Facilities (FacilityId, FacilityName, FacilityCode, OrganizationId, RegionId, City, StateCode, BedSize, EmrSystem, FacilityType, CriticalAccess)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, facility_id_val, 
+                """, facility_id_val,
                      facility_id_val, facility_name_val, facility_internal_code, org_db_id, reg_db_id, city_val, state_val, bed_size_val, emr_val, fac_type_val, crit_access_val)
 
                 fc_desc_val = f"Financial Class {financial_class_id_val}"
@@ -396,14 +396,14 @@ def insert_facility_framework_sqlserver(facility_details_list, organization_code
                     cur.execute("""
                         IF NOT EXISTS (SELECT 1 FROM dbo.FinancialClasses WHERE FinancialClassId = ?)
                         INSERT INTO dbo.FinancialClasses (FinancialClassId, FinancialClassDescription, StandardPayerId, FacilityId) VALUES (?, ?, ?, ?)
-                        """, financial_class_id_val, 
-                             financial_class_id_val, fc_desc_val, payer_db_id_for_fc, facility_id_val) 
+                        """, financial_class_id_val,
+                             financial_class_id_val, fc_desc_val, payer_db_id_for_fc, facility_id_val)
                 else:
                     print(f"Warning: Skipping FC {financial_class_id_val} for facility {facility_id_val} due to missing Payer ID for {payer_code_fk_for_fc}.")
-                
-                dept_desc_val, dept_type_val = f"Department {department_code_val}", "General" 
-                
-                cur.execute("SELECT 1 FROM dbo.ClinicalDepartments WHERE ClinicalDepartmentCode = ? AND FacilityId = ?", 
+
+                dept_desc_val, dept_type_val = f"Department {department_code_val}", "General"
+
+                cur.execute("SELECT 1 FROM dbo.ClinicalDepartments WHERE ClinicalDepartmentCode = ? AND FacilityId = ?",
                             department_code_val, facility_id_val)
                 if not cur.fetchone():
                     cur.execute("""
@@ -434,7 +434,7 @@ def insert_claims_postgres(claims_data_list):
     try:
         conn = psycopg2.connect(**POSTGRES_CONN)
         cur = conn.cursor()
-        
+
         sql_insert = """
             INSERT INTO staging.claims (
                 claim_id, facility_id, department_id, financial_class_id, 
@@ -453,7 +453,7 @@ def insert_claims_postgres(claims_data_list):
             )
             ON CONFLICT (claim_id, service_date) DO NOTHING;
         """
-        
+
         batch_size = 5000
         for i in range(0, len(claims_data_list), batch_size):
             batch = claims_data_list[i:i + batch_size]
@@ -507,7 +507,7 @@ def query_sample_claims_postgres(limit=10):
     try:
         conn = psycopg2.connect(**POSTGRES_CONN)
         cur = conn.cursor()
-        
+
         query = f"""
             SELECT 
                 claim_id,
@@ -534,17 +534,17 @@ def query_sample_claims_postgres(limit=10):
         """
         cur.execute(query)
         rows = cur.fetchall()
-        
+
         if not rows:
             print("No claims found in staging.claims.")
             return
 
         colnames = [desc[0] for desc in cur.description]
         print(" | ".join(colnames))
-        print("-" * (sum(len(cn) for cn in colnames) + (len(colnames) - 1) * 3)) 
+        print("-" * (sum(len(cn) for cn in colnames) + (len(colnames) - 1) * 3))
         for row in rows:
             print(" | ".join(str(value) if value is not None else "NULL" for value in row))
-            
+
     except psycopg2.Error as e:
         print(f"Error querying claims from PostgreSQL: {e}")
     except Exception as e:
@@ -555,9 +555,13 @@ def query_sample_claims_postgres(limit=10):
 
 
 def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules=50):
+    """Generates a list of dictionaries, each containing a datalog rule name and definition."""
     rules = []
-    if not PYDATALOG_AVAILABLE: return rules 
+    if not PYDATALOG_AVAILABLE: return rules
     if not facility_ids_list and not financial_class_codes_list: return rules
+    
+    generated_names = set()
+
     for _ in range(n_rules):
         choices = []
         if facility_ids_list: choices.append("facility")
@@ -565,10 +569,76 @@ def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules
         if not choices: choices.append("units") 
         
         rule_type = random.choice(choices)
-        if rule_type == "facility": rules.append(f"valid_claim(CLAIM) <= claim(CLAIM, '{random.choice(facility_ids_list)}', _, _, _, _, _, _, _, _, _)")
-        elif rule_type == "financial_class": rules.append(f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, '{random.choice(financial_class_codes_list)}', _, _, _, _, _)")
-        else: rules.append(f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, _, _, _, _, _, {random.randint(1, 10)})")
+        rule_name = ""
+        rule_def = ""
+
+        if rule_type == "facility":
+            facility = random.choice(facility_ids_list)
+            rule_name = f"DLG_VALID_FACILITY_{facility}"
+            if rule_name not in generated_names:
+                rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, '{facility}', _, _, _, _, _, _, _, _, _)"
+        elif rule_type == "financial_class":
+            fin_class = random.choice(financial_class_codes_list)
+            rule_name = f"DLG_VALID_FINCLASS_{fin_class}"
+            if rule_name not in generated_names:
+                rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, '{fin_class}', _, _, _, _, _)"
+        else: # units rule
+            units = random.randint(1, 10)
+            rule_name = f"DLG_VALID_UNITS_GTE_{units}"
+            if rule_name not in generated_names:
+                 rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, _, _, _, _, _, Units), Units >= {units}"
+        
+        if rule_name and rule_def:
+            rules.append({"name": rule_name, "definition": rule_def})
+            generated_names.add(rule_name)
+            
     return rules
+
+def insert_datalog_rules_to_db(rules_list):
+    """Inserts generated Datalog rules into the edi.filters table."""
+    if not rules_list:
+        print("No datalog rules generated to insert.")
+        return
+
+    print(f"Attempting to insert {len(rules_list)} Datalog rules into PostgreSQL edi.filters table...")
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        cur = conn.cursor()
+        
+        insert_query = """
+            INSERT INTO edi.filters (
+                filter_name, version, rule_definition, rule_type, is_active, is_latest_version, created_by
+            ) VALUES (
+                %(name)s, %(version)s, %(definition)s, 'DATALOG', TRUE, TRUE, 'setup.py'
+            )
+            ON CONFLICT (filter_name, version) DO NOTHING;
+        """
+        
+        inserted_count = 0
+        for rule_dict in rules_list:
+            data = {
+                "name": rule_dict['name'],
+                "version": 1, # Defaulting version to 1 for this setup script
+                "definition": rule_dict['definition']
+            }
+            cur.execute(insert_query, data)
+            if cur.rowcount > 0:
+                inserted_count += 1
+        
+        conn.commit()
+        print(f"Successfully inserted {inserted_count} new Datalog rules. {len(rules_list) - inserted_count} rules already existed.")
+
+    except psycopg2.Error as e:
+        print(f"Error inserting Datalog rules into PostgreSQL: {e}")
+        if conn: conn.rollback()
+    except Exception as e:
+        print(f"An unexpected error occurred during Datalog rule insertion: {e}")
+        if conn: conn.rollback()
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 def test_pydatalog_rules(claims_data, generated_rules):
     if not PYDATALOG_AVAILABLE:
@@ -588,7 +658,7 @@ def test_pydatalog_rules(claims_data, generated_rules):
             print("  pyDatalog.Logic() instance created. Interaction should use this 'logic' object (e.g., logic.add_clause, logic.ask).")
             print("  The current script's global pyDatalog calls are likely incompatible.")
             print("  Skipping detailed pyDatalog interaction; user adaptation needed for their pyDatalog version.")
-            return 
+            return
 
         cleared_context = False
         if hasattr(pyDatalog, 'clear'):
@@ -599,30 +669,31 @@ def test_pydatalog_rules(claims_data, generated_rules):
             pyDatalog.program().clear()
             cleared_context = True
             print("  Called pyDatalog.program().clear()")
-        
+
         if not cleared_context:
             print("  No standard pyDatalog clear method found. Results may be cumulative if script is re-run.")
 
-        sample_size = min(len(claims_data), 5) 
+        sample_size = min(len(claims_data), 5)
         print(f"  Attempting to assert {sample_size} facts using global pyDatalog.assert_fact...")
         if hasattr(pyDatalog, 'assert_fact'):
             for c_item in random.sample(claims_data, sample_size):
                 pyDatalog.assert_fact('claim',
                                       c_item["claim_id"], c_item["facility_id"], c_item["patient_account"],
                                       str(c_item["start_date"]), str(c_item["end_date"]), c_item["financial_class"],
-                                      str(c_item["patient_dob"]), 
-                                      str(c_item.get("service_line_start", "")), str(c_item.get("service_line_end", "")), 
+                                      str(c_item["patient_dob"]),
+                                      str(c_item.get("service_line_start", "")), str(c_item.get("service_line_end", "")),
                                       float(c_item["rvu"]), int(c_item["units"]))
         else:
             print("  pyDatalog.assert_fact not found.")
-        
+
         print("  Attempting to load rules using global pyDatalog.load...")
         if hasattr(pyDatalog, 'load'):
+            # The test function now receives a list of rule definitions, not dictionaries
             for rule_str in random.sample(generated_rules, min(len(generated_rules), 5)):
                 pyDatalog.load(rule_str)
         else:
             print("  pyDatalog.load not found.")
-        
+
         print("  Attempting to ask query using global pyDatalog.ask...")
         if hasattr(pyDatalog, 'ask'):
             result = pyDatalog.ask('valid_claim(CLAIM)')
@@ -671,15 +742,19 @@ def main():
         print("\n--- Step 6: Generating and Inserting Claims into PostgreSQL Staging ---")
         claims_for_pg = generate_random_claims(fac_ids_list, fc_codes_list_master, dept_ids_master, n_claims=100000) # Changed to 100,000
         insert_claims_postgres(claims_for_pg)
-        
-        query_sample_claims_postgres(limit=5)
 
+        query_sample_claims_postgres(limit=5)
 
         print("\n--- Step 7: Generating pyDatalog Rules ---")
         datalog_rules = generate_random_rules(fac_ids_list, fc_codes_list_master, n_rules=50)
 
+        print("\n--- Step 7.5: Storing pyDatalog Rules in DB ---")
+        insert_datalog_rules_to_db(datalog_rules)
+
         print("\n--- Step 8: Testing pyDatalog Rules Engine ---")
-        test_pydatalog_rules(claims_for_pg, datalog_rules)
+        # Pass just the rule definitions to the test function
+        rule_definitions_for_test = [r['definition'] for r in datalog_rules]
+        test_pydatalog_rules(claims_for_pg, rule_definitions_for_test)
 
         print("\n=== Setup Complete ===")
 

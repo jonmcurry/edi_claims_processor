@@ -154,7 +154,6 @@ ml_model:
 # File Paths and Storage
 # ---------------------
 file_paths:
-  rvu_data_csv: "${RVU_DATA_PATH:-data/rvu_data/rvu_table.csv}"
   sample_edi_claims_dir: "${EDI_SAMPLE_DIR:-data/sample_edi_claims/}" # For testing/dev
   
   # Processing Directories (ensure permissions are correct)
