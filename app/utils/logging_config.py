@@ -149,7 +149,7 @@ def setup_logging():
             # Helper to expand environment variables like ${VAR:-default}
             def _expand_env_var(value: str) -> str:
                 if not isinstance(value, str):
-                    return value
+                    return str(value) # Ensure it's a string for regex
                 # This regex finds ${VAR:-default} or ${VAR}
                 pattern = r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]+))?\}'
                 def replace_match(match):
@@ -164,6 +164,19 @@ def setup_logging():
             audit_log_filename = logging_config.get('audit_log_file', 'audit.log')
             performance_log_filename = logging_config.get('performance_log_file', 'performance.log')
             error_log_filename = logging_config.get('error_log_file', 'error.log')
+
+            # Expand and cast rotation settings to integers
+            max_bytes_str = _expand_env_var(str(logging_config.get('max_bytes', 10485760)))
+            backup_count_str = _expand_env_var(str(logging_config.get('backup_count', 5)))
+            
+            max_bytes = int(max_bytes_str)
+            backup_count = int(backup_count_str)
+
+            audit_max_bytes_str = _expand_env_var(str(logging_config.get('audit_logging', {}).get('max_bytes', max_bytes)))
+            audit_backup_count_str = _expand_env_var(str(logging_config.get('audit_logging', {}).get('backup_count', backup_count)))
+
+            audit_max_bytes = int(audit_max_bytes_str)
+            audit_backup_count = int(audit_backup_count_str)
             
             # Ensure log directory exists
             os.makedirs(log_dir, exist_ok=True)
@@ -191,6 +204,15 @@ def setup_logging():
                 }
                 console_formatter = standard_formatter
             
+            # Process log levels with environment variable expansion
+            level_console = _expand_env_var(logging_config.get('level', 'INFO')).upper()
+            level_app = _expand_env_var(logging_config.get('level', 'INFO')).upper()
+            level_audit = _expand_env_var(logging_config.get('audit_logging', {}).get('log_level', 'INFO')).upper()
+            level_performance = _expand_env_var(logging_config.get('level', 'INFO')).upper()
+            level_sqlalchemy = _expand_env_var(logging_config.get('sqlalchemy_level', 'WARNING')).upper()
+            level_uvicorn = _expand_env_var(logging_config.get('level', 'INFO')).upper()
+            level_fastapi = _expand_env_var(logging_config.get('level', 'INFO')).upper()
+
             log_config = {
                 'version': 1,
                 'disable_existing_loggers': False,
@@ -217,7 +239,7 @@ def setup_logging():
                     'console': {
                         'class': 'logging.StreamHandler',
                         'formatter': 'console',
-                        'level': logging_config.get('level', 'INFO').upper(),
+                        'level': level_console,
                         'filters': ['correlation_id'],
                         'stream': 'ext://sys.stdout',
                     },
@@ -225,38 +247,38 @@ def setup_logging():
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'standard',
                         'filename': os.path.join(log_dir, app_log_filename),
-                        'maxBytes': logging_config.get('max_bytes', 10485760),
-                        'backupCount': logging_config.get('backup_count', 5),
+                        'maxBytes': max_bytes,
+                        'backupCount': backup_count,
                         'encoding': 'utf8',
-                        'level': logging_config.get('level', 'INFO').upper(),
+                        'level': level_app,
                         'filters': ['correlation_id', 'performance'],
                     },
                     'audit_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'audit',
                         'filename': os.path.join(log_dir, audit_log_filename),
-                        'maxBytes': logging_config.get('max_bytes', 10485760),
-                        'backupCount': logging_config.get('backup_count', 5),
+                        'maxBytes': audit_max_bytes,
+                        'backupCount': audit_backup_count,
                         'encoding': 'utf8',
-                        'level': 'INFO',
+                        'level': level_audit,
                         'filters': ['correlation_id'],
                     },
                     'performance_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'performance',
                         'filename': os.path.join(log_dir, performance_log_filename),
-                        'maxBytes': logging_config.get('max_bytes', 10485760),
-                        'backupCount': logging_config.get('backup_count', 5),
+                        'maxBytes': max_bytes,
+                        'backupCount': backup_count,
                         'encoding': 'utf8',
-                        'level': 'INFO',
+                        'level': level_performance,
                         'filters': ['correlation_id', 'performance'],
                     },
                     'error_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'standard',
                         'filename': os.path.join(log_dir, error_log_filename),
-                        'maxBytes': logging_config.get('max_bytes', 10485760),
-                        'backupCount': logging_config.get('backup_count', 10),
+                        'maxBytes': max_bytes,
+                        'backupCount': backup_count,
                         'encoding': 'utf8',
                         'level': 'ERROR',
                         'filters': ['correlation_id'],
@@ -265,32 +287,32 @@ def setup_logging():
                 'loggers': {
                     'app': {
                         'handlers': ['console', 'app_file_handler', 'error_file_handler'],
-                        'level': logging_config.get('level', 'INFO').upper(),
+                        'level': level_app,
                         'propagate': False
                     },
                     'audit': {
                         'handlers': ['audit_file_handler'],
-                        'level': 'INFO',
+                        'level': level_audit,
                         'propagate': False
                     },
                     'performance': {
                         'handlers': ['performance_file_handler'],
-                        'level': 'INFO',
+                        'level': level_performance,
                         'propagate': False
                     },
                     'sqlalchemy.engine': {
                         'handlers': ['app_file_handler'],
-                        'level': logging_config.get('sqlalchemy_level', 'WARNING').upper(),
+                        'level': level_sqlalchemy,
                         'propagate': False
                     },
                     'uvicorn': {
                         'handlers': ['app_file_handler'],
-                        'level': 'INFO',
+                        'level': level_uvicorn,
                         'propagate': False
                     },
                     'fastapi': {
                         'handlers': ['app_file_handler'],
-                        'level': 'INFO',
+                        'level': level_fastapi,
                         'propagate': False
                     }
                 },

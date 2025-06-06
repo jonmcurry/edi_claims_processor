@@ -30,7 +30,6 @@ class ErrorCategory(Enum):
     DATABASE = "Database"
     STAGING_DATABASE = "StagingDatabase"
     PRODUCTION_DATABASE = "ProductionDatabase"
-    PARSING = "Parsing"
     VALIDATION = "Validation"
     MACHINE_LEARNING = "MachineLearning"
     API = "API"
@@ -375,27 +374,6 @@ class ProductionDBError(DatabaseError):
         )
         self.error_code = "PROD_DB_ERROR"
         self.category = ErrorCategory.PRODUCTION_DATABASE
-
-class EDIParserError(AppException):
-    """For errors encountered during EDI file parsing."""
-    def __init__(self, message: str, claim_id: str = None, segment: str = None, details: dict = None):
-        super().__init__(
-            message=message,
-            error_code="EDI_PARSE_ERROR",
-            details=details,
-            category=ErrorCategory.PARSING,
-            severity=ErrorSeverity.MEDIUM,
-            impact=ErrorImpact.BACKGROUND_PROCESS,
-            component="EDIParser",
-            recoverable=True,
-            auto_retry=True
-        )
-        self.claim_id = claim_id
-        self.segment = segment
-        if self.claim_id: 
-            self.details['claim_id'] = self.claim_id
-        if self.segment: 
-            self.details['segment'] = self.segment
 
 class ValidationError(AppException):
     """For errors during data validation (rules engine)."""

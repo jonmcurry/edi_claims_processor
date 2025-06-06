@@ -19,7 +19,7 @@ postgres_staging:
   port: "${PG_PORT:-5432}"
   database: "${PG_DATABASE:-edi_staging}"
   user: "${PG_USER:-postgres}"
-  password: "${PG_PASSWORD:-ClearToFly1}" # Use environment variables for passwords in production
+  password: "${PG_PASSWORD:-admin}" # Use environment variables for passwords in production
   
   # Connection Pool Settings
   pool_size: "${PG_POOL_SIZE:-20}" # Increased for production load
@@ -154,14 +154,7 @@ ml_model:
 # File Paths and Storage
 # ---------------------
 file_paths:
-  sample_edi_claims_dir: "${EDI_SAMPLE_DIR:-data/sample_edi_claims/}" # For testing/dev
-  
-  # Processing Directories (ensure permissions are correct)
-  edi_input_dir: "${EDI_INPUT_DIR:-data/edi_input/}"
-  edi_processing_dir: "${EDI_PROCESSING_DIR:-data/edi_processing/}" # For files currently being parsed
-  edi_processed_dir: "${EDI_PROCESSED_DIR:-data/edi_processed/}" # Successfully parsed files archive
-  edi_error_dir: "${EDI_ERROR_DIR:-data/edi_error/}" # Files that failed parsing catastrophically
-  
+  # The EDI-related directories have been removed as processing now starts from the database.
   log_dir: "${LOG_DIR:-logs/}"
   metrics_dir: "${METRICS_DIR:-metrics/}" # For exported metrics files
   health_check_dir: "${HEALTH_DIR:-health/}" # For health check status files if any

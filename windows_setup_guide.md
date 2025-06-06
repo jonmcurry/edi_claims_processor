@@ -1,45 +1,18 @@
-# Windows Development Setup Guide for EDI Claims Processor
-
-## Platform-Specific Considerations
-
-### 1. Event Loop Differences
-
-**Issue**: `uvloop` is not supported on Windows
-**Solution**: The requirements.txt now conditionally installs platform-specific event loops:
-
-```bash
-# Linux/macOS gets uvloop (high performance)
+Windows Development Setup Guide for EDI Claims ProcessorPlatform-Specific Considerations1. Event Loop DifferencesIssue: uvloop is not supported on WindowsSolution: The requirements.txt now conditionally installs platform-specific event loops:# Linux/macOS gets uvloop (high performance)
 uvloop>=0.19.0; sys_platform != "win32"
 
 # Windows gets winloop (compatibility alternative)
 winloop>=0.1.0; sys_platform == "win32"
-```
-
-### 2. Database Driver Considerations
-
-#### SQL Server ODBC Driver on Windows
-```powershell
-# Download and install Microsoft ODBC Driver 17 for SQL Server
-# https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server
+2. Database Driver ConsiderationsSQL Server ODBC Driver on Windows# Download and install Microsoft ODBC Driver 17 for SQL Server
+# [https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server](https://docs.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server)
 
 # Verify installation
 sqlcmd -?
-```
-
-#### PostgreSQL on Windows
-```powershell
-# Install PostgreSQL
+PostgreSQL on Windows# Install PostgreSQL
 winget install PostgreSQL.PostgreSQL
 
-# Or download from: https://www.postgresql.org/download/windows/
-```
-
-### 3. FastAPI Configuration for Windows
-
-Update your `app/api/main.py` to handle event loop properly:
-
-```python
-import sys
+# Or download from: [https://www.postgresql.org/download/windows/](https://www.postgresql.org/download/windows/)
+3. FastAPI Configuration for WindowsUpdate your app/api/main.py to handle event loop properly:import sys
 import asyncio
 
 # Configure event loop policy for Windows
@@ -58,38 +31,21 @@ else:
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except ImportError:
         pass  # Fall back to default event loop
-```
-
-### 4. Running the Application on Windows
-
-#### Development Mode
-```powershell
-# Install dependencies
+4. Running the Application on WindowsDevelopment Mode# Install dependencies
 pip install -r requirements.txt
 
 # Run with uvicorn (development)
 uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Run main application
-python -m app.main --run_all_processing --source_dir "data/sample_edi_claims"
-```
-
-#### Production Mode on Windows
-```powershell
-# Use hypercorn instead of uvicorn with uvloop
+# Run main application (batch processing from database)
+python -m app.main --run_all_processing
+Production Mode on Windows# Use hypercorn instead of uvicorn with uvloop
 hypercorn app.api.main:app --bind 0.0.0.0:8000 --workers 4
 
 # Or use waitress (Windows-friendly WSGI server)
 pip install waitress
 waitress-serve --host=0.0.0.0 --port=8000 app.api.main:app
-```
-
-### 5. Windows Service Configuration
-
-For running as a Windows Service, create `windows_service.py`:
-
-```python
-import sys
+5. Windows Service ConfigurationFor running as a Windows Service, create windows_service.py:import sys
 import servicemanager
 import win32event
 import win32service
@@ -120,30 +76,15 @@ class EDIClaimsProcessorService(win32serviceutil.ServiceFramework):
 
 if __name__ == '__main__':
     win32serviceutil.HandleCommandLine(EDIClaimsProcessorService)
-```
-
-### 6. Windows-Specific File Paths
-
-Update `config/config.yaml` for Windows paths:
-
-```yaml
-file_paths:
+6. Windows-Specific File PathsUpdate config/config.yaml for Windows paths:file_paths:
   rvu_data_csv: "data\\rvu_data\\rvu_table.csv"  # Windows backslashes
-  sample_edi_claims_dir: "data\\sample_edi_claims\\"
   log_dir: "logs\\"
 
 # Or use forward slashes (works on Windows too)
 file_paths:
   rvu_data_csv: "data/rvu_data/rvu_table.csv"
-  sample_edi_claims_dir: "data/sample_edi_claims/"
   log_dir: "logs/"
-```
-
-### 7. Performance Optimizations for Windows
-
-#### Memory Management
-```python
-# In your batch_handler.py, use ProcessPoolExecutor cautiously on Windows
+7. Performance Optimizations for WindowsMemory Management# In your batch_handler.py, use ProcessPoolExecutor cautiously on Windows
 import multiprocessing
 
 if __name__ == '__main__':
@@ -152,11 +93,7 @@ if __name__ == '__main__':
 # Consider ThreadPoolExecutor for I/O bound operations on Windows
 from concurrent.futures import ThreadPoolExecutor
 executor = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))
-```
-
-#### Database Connection String Adjustments
-```python
-# SQL Server connection for Windows Authentication
+Database Connection String Adjustments# SQL Server connection for Windows Authentication
 connection_string = (
     "mssql+pyodbc:///?odbc_connect="
     "DRIVER={ODBC Driver 17 for SQL Server};"
@@ -165,12 +102,7 @@ connection_string = (
     "Trusted_Connection=yes;"
     "TrustServerCertificate=yes;"  # For local development
 )
-```
-
-### 8. Development Tools for Windows
-
-```powershell
-# Install Windows Subsystem for Linux (WSL) for better Docker support
+8. Development Tools for Windows# Install Windows Subsystem for Linux (WSL) for better Docker support
 wsl --install
 
 # Install Docker Desktop for Windows
@@ -181,13 +113,7 @@ winget install Git.Git
 
 # Install Python build tools
 winget install Microsoft.VisualStudio.2022.BuildTools
-```
-
-### 9. Troubleshooting Common Windows Issues
-
-#### Issue: `asyncio.run()` RuntimeError
-```python
-# Solution: Use proper event loop handling
+9. Troubleshooting Common Windows IssuesIssue: asyncio.run() RuntimeError# Solution: Use proper event loop handling
 import asyncio
 import sys
 
@@ -201,11 +127,7 @@ def run_async_main():
         return loop.run_until_complete(your_async_function())
     finally:
         loop.close()
-```
-
-#### Issue: File locking problems
-```python
-# Use context managers and explicit file closing
+Issue: File locking problems# Use context managers and explicit file closing
 import os
 import tempfile
 
@@ -217,33 +139,17 @@ handler = RotatingFileHandler(
     backupCount=5,
     delay=True  # Don't open file until first log message
 )
-```
-
-#### Issue: Path length limitations
-```python
-# Enable long path support in Windows registry or use short paths
+Issue: Path length limitations# Enable long path support in Windows registry or use short paths
 import os
 os.environ["PYTHONIOENCODING"] = "utf-8"
-```
-
-### 10. Alternative Requirements for Pure Windows Environment
-
-If you need a Windows-optimized requirements file:
-
-```bash
-# Create windows-requirements.txt
+10. Alternative Requirements for Pure Windows EnvironmentIf you need a Windows-optimized requirements file:# Create windows-requirements.txt
 pip freeze > windows-requirements.txt
 
 # Key Windows alternatives:
 # Instead of uvloop: use default asyncio or winloop
 # Instead of gunicorn: use waitress or hypercorn
 # Instead of supervisor: use Windows Service or Task Scheduler
-```
-
-### 11. Running Tests on Windows
-
-```powershell
-# Install test dependencies
+11. Running Tests on Windows# Install test dependencies
 pip install pytest pytest-asyncio pytest-cov
 
 # Run tests with Windows-specific settings
@@ -252,6 +158,4 @@ pytest tests/ -v --cov=app --cov-report=html
 
 # Or use unittest for compatibility
 python -m unittest discover tests/
-```
-
 This setup ensures your EDI Claims Processor runs smoothly on Windows while maintaining compatibility with Linux/macOS for production deployment.
