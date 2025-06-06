@@ -1,11 +1,7 @@
 # app/database/connection_manager.py
 """
-Production-grade database connection manager with advanced features:
-- Async support for high-performance concurrent processing
-- Health checks with automatic reconnection and circuit breaker
-- Read/write splitting for routing queries to appropriate instances
-- Connection monitoring and detailed metrics
-- Sophisticated pool warming with health monitoring
+Production-grade database connection manager with enhanced SQL Server support for Windows.
+Fixed to resolve SQLAlchemy 2.0 pyodbc dialect loading issues on Windows.
 """
 import yaml
 import os
@@ -31,22 +27,62 @@ from app.utils.error_handler import ConfigError
 
 logger = get_logger('app.database.connection_manager')
 
-# --- Pre-flight Check for Database Drivers ---
-try:
-    importlib.import_module("psycopg2")
-    logger.debug("psycopg2 driver found.")
-except ImportError:
-    logger.critical("FATAL: The 'psycopg2' library is not installed. Please run 'pip install psycopg2-binary'.")
+# --- Enhanced Pre-flight Check for Database Drivers ---
+def check_database_drivers():
+    """Check for required database drivers and provide helpful error messages."""
+    drivers_status = {
+        'psycopg2': False,
+        'pyodbc': False,
+        'sqlalchemy_mssql_dialect': False
+    }
+    
+    # Check psycopg2
+    try:
+        importlib.import_module("psycopg2")
+        drivers_status['psycopg2'] = True
+        logger.debug("psycopg2 driver found.")
+    except ImportError:
+        logger.critical("FATAL: The 'psycopg2' library is not installed. Please run 'pip install psycopg2-binary'.")
 
-try:
-    importlib.import_module("pyodbc")
-    logger.debug("pyodbc driver found.")
-except ImportError:
-    logger.critical("FATAL: The 'pyodbc' library is not installed. Please run 'pip install pyodbc' and ensure the Microsoft ODBC Driver is also installed on your system.")
+    # Check pyodbc
+    try:
+        import pyodbc
+        drivers_status['pyodbc'] = True
+        logger.debug(f"pyodbc driver found, version: {pyodbc.version}")
+        
+        # Test if pyodbc can be imported properly
+        drivers = pyodbc.drivers()
+        logger.debug(f"Available ODBC drivers: {drivers}")
+        
+        # Check for SQL Server drivers specifically
+        sql_server_drivers = [d for d in drivers if 'SQL Server' in d]
+        if sql_server_drivers:
+            logger.info(f"SQL Server ODBC drivers found: {sql_server_drivers}")
+        else:
+            logger.warning("No SQL Server ODBC drivers found. Consider installing 'ODBC Driver 17 for SQL Server'")
+            
+    except ImportError:
+        logger.critical("FATAL: The 'pyodbc' library is not installed. Please run 'pip install pyodbc'.")
+    except Exception as e:
+        logger.error(f"pyodbc library found but error during initialization: {e}")
+
+    # Check SQLAlchemy SQL Server dialect
+    try:
+        from sqlalchemy.dialects import mssql
+        from sqlalchemy.dialects.mssql import pyodbc as mssql_pyodbc
+        drivers_status['sqlalchemy_mssql_dialect'] = True
+        logger.debug("SQLAlchemy SQL Server dialect found.")
+    except ImportError as e:
+        logger.critical(f"FATAL: SQLAlchemy SQL Server dialect not available: {e}")
+        
+    return drivers_status
+
+# Perform driver check at module import
+DRIVER_STATUS = check_database_drivers()
 
 class DatabaseType(Enum):
     POSTGRES = "postgresql"
-    SQLSERVER = "sqlserver"
+    SQLSERVER = "mssql"  # Changed from "sqlserver" to "mssql" for SQLAlchemy 2.0
 
 class ConnectionStatus(Enum):
     HEALTHY = "healthy"
@@ -160,48 +196,111 @@ class DatabaseConnection:
         self._start_health_monitoring()
     
     def _get_connection_url(self, for_async: bool = False) -> str:
-        db_type_str = self.config.db_type.value
-        driver_part = ""
-        if for_async:
-            driver_map = {DatabaseType.POSTGRES: "+asyncpg", DatabaseType.SQLSERVER: "+aioodbc"}
-            driver_part = driver_map.get(self.config.db_type, "")
-        else:
-            driver_map = {DatabaseType.POSTGRES: "+psycopg2", DatabaseType.SQLSERVER: "+pyodbc"}
-            driver_part = driver_map.get(self.config.db_type, "")
-
-        if not driver_part: raise ConfigError(f"Driver not configured for DB type: {db_type_str} (async={for_async})")
-
-        protocol = f"{db_type_str}{driver_part}"
-
-        if self.config.db_type == DatabaseType.SQLSERVER and self.config.driver:
-            odbc_parts = [f"DRIVER={{{self.config.driver}}}", f"SERVER={self.config.host},{self.config.port}", f"DATABASE={self.config.database}"]
-            if self.config.trusted_connection:
-                odbc_parts.append("Trusted_Connection=yes")
-            else:
-                odbc_parts.extend([f"UID={self.config.user}", f"PWD={self.config.password}"])
-            return f"{protocol}:///?odbc_connect={';'.join(odbc_parts)}"
+        """Build connection URL with enhanced SQL Server support for Windows."""
+        db_type = self.config.db_type
         
-        auth_part = f"{self.config.user}:{self.config.password}@" if self.config.user and self.config.password else ""
-        return f"{protocol}://{auth_part}{self.config.host}:{self.config.port}/{self.config.database}"
+        if db_type == DatabaseType.POSTGRES:
+            driver_part = "+asyncpg" if for_async else "+psycopg2"
+            auth_part = f"{self.config.user}:{self.config.password}@" if self.config.user and self.config.password else ""
+            return f"postgresql{driver_part}://{auth_part}{self.config.host}:{self.config.port}/{self.config.database}"
+        
+        elif db_type == DatabaseType.SQLSERVER:
+            # Enhanced SQL Server connection handling for Windows
+            if for_async:
+                # For async, we need aioodbc but it's often problematic
+                # Fall back to sync for now or use a different approach
+                logger.warning("Async SQL Server connections may have limited support. Using sync-compatible URL.")
+                driver_part = "+pyodbc"
+            else:
+                driver_part = "+pyodbc"
+            
+            # Build connection string based on configuration
+            if self.config.trusted_connection:
+                # Windows Authentication
+                if self.config.driver:
+                    # Using explicit driver with Windows auth
+                    odbc_params = [
+                        f"DRIVER={{{self.config.driver}}}",
+                        f"SERVER={self.config.host},{self.config.port}",
+                        f"DATABASE={self.config.database}",
+                        "Trusted_Connection=yes",
+                        "TrustServerCertificate=yes"  # For local development
+                    ]
+                    return f"mssql{driver_part}:///?odbc_connect={';'.join(odbc_params)}"
+                else:
+                    # Try direct URL with trusted connection
+                    return f"mssql{driver_part}://{self.config.host}:{self.config.port}/{self.config.database}?trusted_connection=yes&TrustServerCertificate=yes"
+            else:
+                # SQL Server Authentication
+                if self.config.driver:
+                    # Using explicit driver with SQL auth
+                    odbc_params = [
+                        f"DRIVER={{{self.config.driver}}}",
+                        f"SERVER={self.config.host},{self.config.port}",
+                        f"DATABASE={self.config.database}",
+                        f"UID={self.config.user}",
+                        f"PWD={self.config.password}",
+                        "TrustServerCertificate=yes"
+                    ]
+                    return f"mssql{driver_part}:///?odbc_connect={';'.join(odbc_params)}"
+                else:
+                    # Direct URL with SQL auth
+                    auth_part = f"{self.config.user}:{self.config.password}@" if self.config.user and self.config.password else ""
+                    return f"mssql{driver_part}://{auth_part}{self.config.host}:{self.config.port}/{self.config.database}?TrustServerCertificate=yes"
+        
+        else:
+            raise ConfigError(f"Unsupported database type: {db_type}")
 
     def _initialize_connection(self):
         logger.info(f"Initializing connection for {self.config.name}...")
+        
+        # Check if required drivers are available
+        if self.config.db_type == DatabaseType.POSTGRES and not DRIVER_STATUS['psycopg2']:
+            raise ConfigError("PostgreSQL driver (psycopg2) is not available")
+        elif self.config.db_type == DatabaseType.SQLSERVER and not DRIVER_STATUS['pyodbc']:
+            raise ConfigError("SQL Server driver (pyodbc) is not available")
+        
         try:
             sync_url = self._get_connection_url(for_async=False)
-            connect_args = {'connect_timeout': self.config.connect_timeout} if self.config.db_type == DatabaseType.POSTGRES else {}
+            logger.debug(f"Sync connection URL for {self.config.name}: {sync_url}")
             
-            self.engine = create_engine(sync_url, poolclass=QueuePool, pool_size=self.config.pool_size,
-                                      max_overflow=self.config.max_overflow, pool_timeout=self.config.pool_timeout,
-                                      pool_recycle=self.config.pool_recycle, pool_pre_ping=True,
-                                      connect_args=connect_args, echo=False)
+            # Build connect_args based on database type
+            connect_args = {}
+            if self.config.db_type == DatabaseType.POSTGRES:
+                connect_args = {'connect_timeout': self.config.connect_timeout}
+            elif self.config.db_type == DatabaseType.SQLSERVER:
+                # SQL Server specific connection arguments
+                connect_args = {
+                    'timeout': self.config.connect_timeout,
+                    'autocommit': False
+                }
+            
+            self.engine = create_engine(
+                sync_url, 
+                poolclass=QueuePool, 
+                pool_size=self.config.pool_size,
+                max_overflow=self.config.max_overflow, 
+                pool_timeout=self.config.pool_timeout,
+                pool_recycle=self.config.pool_recycle, 
+                pool_pre_ping=True,
+                connect_args=connect_args, 
+                echo=False,
+                # Additional SQL Server optimizations
+                fast_executemany=True if self.config.db_type == DatabaseType.SQLSERVER else None
+            )
             
             self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
             self.scoped_session_factory = scoped_session(self.session_factory)
 
-            async_url = self._get_connection_url(for_async=True)
-            self.async_engine = create_async_engine(async_url, pool_size=self.config.pool_size,
-                                                    max_overflow=self.config.max_overflow, echo=False)
-            self.async_session_factory = async_sessionmaker(bind=self.async_engine, class_=AsyncSession)
+            # Async engine setup (limited for SQL Server)
+            if self.config.db_type == DatabaseType.POSTGRES:
+                try:
+                    async_url = self._get_connection_url(for_async=True)
+                    self.async_engine = create_async_engine(async_url, pool_size=self.config.pool_size,
+                                                            max_overflow=self.config.max_overflow, echo=False)
+                    self.async_session_factory = async_sessionmaker(bind=self.async_engine, class_=AsyncSession)
+                except Exception as e:
+                    logger.warning(f"Async engine setup failed for {self.config.name}: {e}")
             
             self._add_event_listeners()
             self._warm_connection_pool()
@@ -211,10 +310,26 @@ class DatabaseConnection:
         except NoSuchModuleError as nsme:
             logger.critical(f"SQLAlchemy driver error for {self.config.name}: {nsme}. This means a required library (like 'pyodbc') is not installed or accessible. Please check your environment.", exc_info=True)
             self.metrics.health_status = ConnectionStatus.UNHEALTHY
+            
+            # Provide specific guidance for SQL Server issues
+            if self.config.db_type == DatabaseType.SQLSERVER:
+                logger.critical("SQL Server connection failed. Please ensure:")
+                logger.critical("1. pyodbc is installed: pip install pyodbc")
+                logger.critical("2. Microsoft ODBC Driver for SQL Server is installed")
+                logger.critical("3. Your config.yaml specifies a valid driver name")
+                logger.critical("Available drivers on your system:")
+                try:
+                    import pyodbc
+                    for driver in pyodbc.drivers():
+                        logger.critical(f"   - {driver}")
+                except:
+                    logger.critical("   Could not enumerate drivers")
+            raise
         except Exception as e:
             logger.error(f"Failed to initialize connection for {self.config.name}: {e}", exc_info=True)
             self.metrics.health_status = ConnectionStatus.UNHEALTHY
             self.metrics.failed_connection_attempts += 1
+            raise
     
     def _add_event_listeners(self):
         if not self.engine: return
@@ -257,8 +372,14 @@ class DatabaseConnection:
                 conn = self.engine.connect()
                 conn.execute(text(self.config.health_check_query))
                 warmed_connections.append(conn)
+        except Exception as e:
+            logger.warning(f"Pool warming failed for {self.config.name}: {e}")
         finally:
-            for conn in warmed_connections: conn.close()
+            for conn in warmed_connections: 
+                try:
+                    conn.close()
+                except:
+                    pass
             logger.info(f"Pool warming for {self.config.name} completed.")
 
     def _start_health_monitoring(self):
@@ -281,8 +402,10 @@ class DatabaseConnection:
                 connection.execute(text(self.config.health_check_query))
             self.circuit_breaker.record_success()
             self.metrics.health_status = ConnectionStatus.HEALTHY
+            self.metrics.consecutive_health_check_failures = 0
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Health check failed for {self.config.name}: {e}")
             self._handle_health_check_failure()
             return False
 
@@ -291,33 +414,48 @@ class DatabaseConnection:
         self.metrics.health_status = ConnectionStatus.UNHEALTHY
         self.circuit_breaker.record_failure()
         if self.metrics.consecutive_health_check_failures >= self.config.max_retries_on_failure:
+            logger.warning(f"Multiple health check failures for {self.config.name}, attempting connection reset")
             self._attempt_connection_reset()
             self.metrics.consecutive_health_check_failures = 0
 
     def _attempt_connection_reset(self):
         try:
-            if self.engine: self.engine.dispose()
+            if self.engine: 
+                self.engine.dispose()
+            time.sleep(2)  # Brief pause before reinitializing
             self._initialize_connection()
-            if self.engine: self.metrics.health_status = ConnectionStatus.UNKNOWN
+            if self.engine: 
+                self.metrics.health_status = ConnectionStatus.UNKNOWN
         except Exception as e:
             logger.error(f"Error during connection reset for {self.config.name}: {e}")
 
     def get_session(self) -> Session:
-        if not self.scoped_session_factory: raise SQLAlchemyError(f"Connection {self.config.name} not ready.")
-        if not self.circuit_breaker.can_execute(): raise OperationalError(f"Circuit breaker for {self.config.name} is OPEN.", None, None)
+        if not self.scoped_session_factory: 
+            raise SQLAlchemyError(f"Connection {self.config.name} not ready.")
+        if not self.circuit_breaker.can_execute(): 
+            raise OperationalError(f"Circuit breaker for {self.config.name} is OPEN.", None, None)
         return self.scoped_session_factory()
 
     async def get_async_session(self) -> AsyncSession:
-        if not self.async_session_factory: raise SQLAlchemyError(f"Async connection {self.config.name} not ready.")
-        if not self.circuit_breaker.can_execute(): raise OperationalError(f"Circuit breaker for {self.config.name} (async) is OPEN.", None, None)
+        if not self.async_session_factory: 
+            raise SQLAlchemyError(f"Async connection {self.config.name} not ready.")
+        if not self.circuit_breaker.can_execute(): 
+            raise OperationalError(f"Circuit breaker for {self.config.name} (async) is OPEN.", None, None)
         return self.async_session_factory()
             
     def close(self):
         self._health_check_stop_event.set()
-        if self._health_check_thread: self._health_check_thread.join(timeout=2)
-        if self.scoped_session_factory: self.scoped_session_factory.remove()
-        if self.engine: self.engine.dispose()
-        if self.async_engine: asyncio.run(self.async_engine.dispose())
+        if self._health_check_thread: 
+            self._health_check_thread.join(timeout=2)
+        if self.scoped_session_factory: 
+            self.scoped_session_factory.remove()
+        if self.engine: 
+            self.engine.dispose()
+        if self.async_engine: 
+            try:
+                asyncio.run(self.async_engine.dispose())
+            except:
+                pass
 
 class EnhancedConnectionManager:
     _instance = None
@@ -359,11 +497,22 @@ class EnhancedConnectionManager:
             'sql_server_production': ('sqlserver_primary', DatabaseType.SQLSERVER, 'sql_server_read_replica_server')
         }.items():
             if db_config := self._config.get(key):
-                self.connections[name] = DatabaseConnection(self._create_db_config_object(db_config, name, db_type))
+                try:
+                    self.connections[name] = DatabaseConnection(self._create_db_config_object(db_config, name, db_type))
+                    logger.info(f"Successfully initialized connection: {name}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize connection {name}: {e}")
+                    # Continue with other connections even if one fails
+                    
                 if self._read_write_splitting_enabled and (replica_host := self._resolve_config_value(performance_config.get(replica_key))):
                     replica_name = name.replace("_primary", "_replica")
                     replica_config = {**db_config, 'host': replica_host}
-                    self.connections[replica_name] = DatabaseConnection(self._create_db_config_object(replica_config, replica_name, db_type), is_replica=True)
+                    try:
+                        self.connections[replica_name] = DatabaseConnection(self._create_db_config_object(replica_config, replica_name, db_type), is_replica=True)
+                        logger.info(f"Successfully initialized replica connection: {replica_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to initialize replica connection {replica_name}: {e}")
+                        
         self._start_global_monitoring()
 
     def _resolve_config_value(self, value: Any) -> str:
@@ -375,18 +524,36 @@ class EnhancedConnectionManager:
         resolved = {k: self._resolve_config_value(v) for k, v in yaml_config.items()}
         perf_conf = self._config.get('performance', {})
         
-        port_str = str(resolved.get('port', {DatabaseType.POSTGRES: 5432, DatabaseType.SQLSERVER: 1433}[db_type]))
+        # Default ports for each database type
+        default_ports = {DatabaseType.POSTGRES: 5432, DatabaseType.SQLSERVER: 1433}
+        port_str = str(resolved.get('port', default_ports[db_type]))
+        
         try:
             port_val = int(port_str)
         except ValueError:
             raise ConfigError(f"Database port for '{name}' could not be converted to an integer. "
                               f"Check environment variables. Value received: '{port_str}'")
         
+        # Parse server field for SQL Server (might include port)
+        host = resolved.get('host', 'localhost')
+        if db_type == DatabaseType.SQLSERVER and 'server' in resolved:
+            server_str = resolved['server']
+            if ',' in server_str:
+                host, port_str = server_str.split(',', 1)
+                try:
+                    port_val = int(port_str)
+                except ValueError:
+                    logger.warning(f"Could not parse port from server string: {server_str}")
+            else:
+                host = server_str
+        
         return DatabaseConfig(
             name=name, db_type=db_type,
-            host=resolved.get('host', 'localhost'), port=port_val,
-            database=resolved.get('database'), user=resolved.get('user'), password=resolved.get('password'),
-            trusted_connection=(resolved.get('trusted_connection', 'no').lower() == 'yes'),
+            host=host, port=port_val,
+            database=resolved.get('database'), 
+            user=resolved.get('user'), 
+            password=resolved.get('password'),
+            trusted_connection=(resolved.get('trusted_connection', 'no').lower() in ['yes', 'true', '1']),
             driver=resolved.get('driver'),
             pool_size=int(resolved.get('pool_size', 10)),
             max_overflow=int(resolved.get('max_overflow', 20)),
@@ -407,19 +574,23 @@ class EnhancedConnectionManager:
         return self.connections.get(base_name)
 
     def get_postgres_session(self, read_only: bool = False) -> Session:
-        if conn := self._get_connection("postgres_primary", read_only): return conn.get_session()
+        if conn := self._get_connection("postgres_primary", read_only): 
+            return conn.get_session()
         raise SQLAlchemyError("PostgreSQL connection 'postgres_primary' not available.")
 
     async def get_postgres_async_session(self, read_only: bool = False) -> AsyncSession:
-        if conn := self._get_connection("postgres_primary", read_only): return await conn.get_async_session()
+        if conn := self._get_connection("postgres_primary", read_only): 
+            return await conn.get_async_session()
         raise SQLAlchemyError("Async PostgreSQL 'postgres_primary' not available.")
 
     def get_sqlserver_session(self, read_only: bool = False) -> Session:
-        if conn := self._get_connection("sqlserver_primary", read_only): return conn.get_session()
+        if conn := self._get_connection("sqlserver_primary", read_only): 
+            return conn.get_session()
         raise SQLAlchemyError("SQL Server connection 'sqlserver_primary' not available.")
 
     async def get_sqlserver_async_session(self, read_only: bool = False) -> AsyncSession:
-        if conn := self._get_connection("sqlserver_primary", read_only): return await conn.get_async_session()
+        if conn := self._get_connection("sqlserver_primary", read_only): 
+            return await conn.get_async_session()
         raise SQLAlchemyError("Async SQL Server 'sqlserver_primary' not available.")
 
     def _start_global_monitoring(self):
@@ -437,7 +608,8 @@ class EnhancedConnectionManager:
         logger.info("--- Global Database Connection Metrics Report ---")
         for name, conn in self.connections.items():
             m = conn.metrics
-            logger.info(f"  {name}: Status={m.health_status.value}, CB={conn.circuit_breaker.state.value}")
+            logger.info(f"  {name}: Status={m.health_status.value}, CB={conn.circuit_breaker.state.value}, "
+                       f"Queries={m.total_queries_executed}, AvgTime={m.avg_query_response_time_ms:.2f}ms")
 
     def dispose_all_connections(self):
         self._monitoring_stop_event.set()

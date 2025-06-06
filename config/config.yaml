@@ -1,8 +1,7 @@
 # config/config.yaml
 # Enhanced Production-Ready Configuration for EDI Claims Processor
 # ================================================================
-# This version has been refactored to remove all environment variable
-# dependencies, using hardcoded default values instead.
+# This version has been optimized for Windows SQL Server connectivity
 
 # Environment Configuration
 # -------------------------
@@ -42,13 +41,25 @@ postgres_staging:
   ssl_ca: ""
 
 # SQL Server connection (Production Database)
+# IMPORTANT: This configuration has been optimized for Windows with SQL Server
 sql_server_production:
-  driver: "{ODBC Driver 17 for SQL Server}" # Make sure this driver is installed
-  server: "localhost,1433" # e.g., "my-sql-server.database.windows.net,1433" or "localhost\\SQLEXPRESS"
+  # Use 'server' instead of 'host' for SQL Server (supports comma notation for port)
+  server: "localhost,1433"  # hostname,port format for SQL Server
+  host: "localhost"         # Fallback host field
+  port: 1433               # Fallback port field
   database: "edi_production"
+  
+  # Authentication Configuration
   user: "sa"
   password: "ClearToFly1" # CHANGE ME for production
-  trusted_connection: "no" # Set to "no" when using user/password authentication
+  trusted_connection: "no" # Set to "yes" for Windows Authentication
+  
+  # CRITICAL: Specify the exact ODBC driver installed on your system
+  # Common options (check which one you have installed):
+  driver: "ODBC Driver 17 for SQL Server"    # Most common modern driver
+  # driver: "ODBC Driver 18 for SQL Server"  # Newer alternative
+  # driver: "SQL Server"                     # Legacy driver
+  # driver: "SQL Server Native Client 11.0"  # Older alternative
   
   # Connection Pool Settings
   pool_size: 20
@@ -61,10 +72,14 @@ sql_server_production:
   connect_timeout: 15
   command_timeout: 300
     
-  # Additional Connection Parameters
+  # Additional Connection Parameters for SQL Server
   mars_connection: true
   encrypt: "yes"
   trust_server_certificate: "yes" # Set to 'yes' for local dev, 'no' for prod
+  
+  # SQL Server specific optimizations
+  fast_executemany: true
+  autocommit: false
 
 # Processing Parameters
 # ---------------------
@@ -208,6 +223,7 @@ caching:
     password: ""
     db_api_cache: 0
     db_app_cache: 1
+    url: "redis://localhost:6379/0"
 
 # Security Configuration
 # ----------------------
@@ -284,3 +300,15 @@ feature_flags:
   use_enhanced_ml_model_v2: false
   enable_experimental_validation_rules: false
   enable_realtime_dashboard_api_caching: true
+
+# Windows-specific settings
+# -------------------------
+windows_settings:
+  # SQL Server connection debugging
+  sql_server_debug_connection: false
+  sql_server_connection_timeout: 30
+  sql_server_login_timeout: 60
+  
+  # ODBC Driver debugging
+  enable_odbc_trace: false
+  odbc_trace_file: "logs/odbc_trace.log"
