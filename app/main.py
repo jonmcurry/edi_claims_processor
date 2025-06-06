@@ -6,12 +6,10 @@ Optimized version with rate limiting, async middleware, response caching, and mo
 py -m app.main --run_all_processing 
 """
 import time
-import sys
-import asyncio
 from typing import Dict, Any
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Request, Response, status, HTTPException
+from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware

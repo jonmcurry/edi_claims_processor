@@ -5,6 +5,7 @@ FastAPI endpoints for the Failed Claims UI and other API interactions.
 from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from datetime import date, datetime, timedelta
 
 # Assuming schemas are in app.api.schemas
 from app.api import schemas # Relative import
@@ -12,6 +13,7 @@ from app.database.connection_manager import get_sqlserver_session # For SQL Serv
 from app.database.sqlserver_handler import ( # Functions from your SQL Server handler
     get_failed_claims_summary, get_failed_claim_by_id, update_failed_claim_status
 )
+from app.database.models.sqlserver_models import FailedClaimDetail
 from app.services.claim_repair_service import ClaimRepairService # Placeholder service
 from app.utils.logging_config import get_logger, set_correlation_id, get_correlation_id
 from app.utils.error_handler import ProductionDBError, APIError

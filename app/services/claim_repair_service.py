@@ -4,6 +4,7 @@ Placeholder for AI-powered claim repair suggestions.
 This service would interact with an external AI model or a more complex internal logic
 to suggest fixes for common claim errors.
 """
+from typing import List
 from app.utils.logging_config import get_logger
 # from app.utils.error_handler import ExternalServiceError # If calling an external API
 
