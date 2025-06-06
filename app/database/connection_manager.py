@@ -50,7 +50,7 @@ except ImportError:
 
 class DatabaseType(Enum):
     """Enumeration for database types."""
-    POSTGRES = "postgres"
+    POSTGRES = "postgresql"
     SQLSERVER = "sqlserver"
 
 class ConnectionStatus(Enum):
