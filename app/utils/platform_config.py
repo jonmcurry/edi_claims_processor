@@ -93,6 +93,7 @@ def get_platform_specific_config():
 
 # Global platform configuration
 PLATFORM_CONFIG = get_platform_specific_config()
+HAS_PLATFORM_CONFIG = True # This flag indicates the module was successfully imported
 
 def configure_multiprocessing():
     """
