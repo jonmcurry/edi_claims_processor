@@ -19,7 +19,7 @@ postgres_staging:
   port: "${PG_PORT:-5432}"
   database: "${PG_DATABASE:-edi_staging}"
   user: "${PG_USER:-postgres}"
-  password: "${PG_PASSWORD:-admin}" # Use environment variables for passwords in production
+  password: "${PG_PASSWORD:-ClearToFly1}" # Use environment variables for passwords in production
   
   # Connection Pool Settings
   pool_size: "${PG_POOL_SIZE:-20}" # Increased for production load
@@ -350,7 +350,7 @@ ui_services:
 # Performance specific configurations (can consolidate some from above)
 # ----------------------------------
 performance:
-  enable_read_write_splitting: "${DB_READ_WRITE_SPLIT_ENABLED:-true}"
+  enable_read_write_splitting: "${DB_READ_WRITE_SPLIT_ENABLED:-false}" # Enable if using read replicas
   postgres_read_replica_host: "${PG_READ_REPLICA_HOST:-}" # e.g., "pg-replica.example.com"
   sql_server_read_replica_server: "${MSSQL_READ_REPLICA_SERVER:-}" # e.g., "sql-replica.example.com\\SQLEXPRESS"
 
