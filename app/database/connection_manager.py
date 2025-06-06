@@ -32,6 +32,22 @@ from app.utils.error_handler import ConfigError # For configuration related erro
 
 logger = get_logger('app.database.connection_manager')
 
+# --- Pre-flight Check for Database Drivers ---
+try:
+    importlib.import_module("psycopg2")
+    logger.debug("psycopg2 driver found.")
+except ImportError:
+    logger.critical("FATAL: The 'psycopg2' library is not installed, but it is required for PostgreSQL connections. Please run 'pip install psycopg2-binary'.")
+    # In a real application, you might want to exit here.
+    # For this interactive context, we'll let SQLAlchemy raise the error to show the full stack.
+
+try:
+    importlib.import_module("pyodbc")
+    logger.debug("pyodbc driver found.")
+except ImportError:
+    logger.critical("FATAL: The 'pyodbc' library is not installed, but it is required for SQL Server connections. Please run 'pip install pyodbc'.")
+
+
 class DatabaseType(Enum):
     """Enumeration for database types."""
     POSTGRES = "postgres"
@@ -166,7 +182,6 @@ class DatabaseConnection:
         self.async_engine = None
         self.session_factory: Optional[sessionmaker] = None
         self.async_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
-        # Using scoped_session for thread-local sessions in sync mode
         self.scoped_session_factory: Optional[scoped_session] = None 
         
         self._health_check_thread: Optional[threading.Thread] = None
@@ -176,24 +191,20 @@ class DatabaseConnection:
         self._start_health_monitoring()
     
     def _get_connection_url(self, for_async: bool = False) -> str:
-        """Builds the SQLAlchemy connection URL."""
         db_type_str = self.config.db_type.value
+        driver_part = ""
         if for_async:
-            if self.config.db_type == DatabaseType.POSTGRES:
-                driver_part = "asyncpg"
-            elif self.config.db_type == DatabaseType.SQLSERVER:
-                driver_part = "aioodbc" # Example, actual driver might vary
-            else:
+            driver_map = {DatabaseType.POSTGRES: "+asyncpg", DatabaseType.SQLSERVER: "+aioodbc"}
+            driver_part = driver_map.get(self.config.db_type)
+            if not driver_part:
                 raise ConfigError(f"Async not configured for DB type: {db_type_str}")
-            protocol = f"{db_type_str}+{driver_part}"
         else: # Sync
-            if self.config.db_type == DatabaseType.POSTGRES:
-                driver_part = "psycopg2"
-            elif self.config.db_type == DatabaseType.SQLSERVER:
-                driver_part = "pyodbc"
-            else:
+            driver_map = {DatabaseType.POSTGRES: "+psycopg2", DatabaseType.SQLSERVER: "+pyodbc"}
+            driver_part = driver_map.get(self.config.db_type)
+            if not driver_part:
                 raise ConfigError(f"Sync not configured for DB type: {db_type_str}")
-            protocol = f"{db_type_str}+{driver_part}"
+
+        protocol = f"{db_type_str}{driver_part}"
 
         if self.config.db_type == DatabaseType.SQLSERVER and self.config.driver:
             odbc_connect_parts = [f"DRIVER={{{self.config.driver}}}", f"SERVER={self.config.host},{self.config.port}", f"DATABASE={self.config.database}"]
@@ -205,68 +216,34 @@ class DatabaseConnection:
             
             odbc_connect_str = ";".join(odbc_connect_parts)
             return f"{protocol}:///?odbc_connect={odbc_connect_str}"
-        else: # PostgreSQL or SQL Server without explicit driver string format
-            auth_part = ""
-            if self.config.user and self.config.password:
-                auth_part = f"{self.config.user}:{self.config.password}@"
+        else:
+            auth_part = f"{self.config.user}:{self.config.password}@" if self.config.user and self.config.password else ""
             return f"{protocol}://{auth_part}{self.config.host}:{self.config.port}/{self.config.database}"
 
     def _initialize_connection(self):
-        """Initializes both synchronous and asynchronous SQLAlchemy engines and session factories."""
         logger.info(f"Initializing connection for {self.config.name} ({'replica' if self.is_replica else 'primary'})...")
         
-        # Pre-check for required drivers to provide a clearer error message
-        try:
-            if self.config.db_type == DatabaseType.POSTGRES:
-                importlib.import_module("psycopg2")
-            elif self.config.db_type == DatabaseType.SQLSERVER:
-                importlib.import_module("pyodbc")
-        except ImportError as ie:
-            logger.critical(f"Database driver for {self.config.db_type.name} not found. Please install 'psycopg2-binary' for PostgreSQL or 'pyodbc' for SQL Server.", exc_info=True)
-            self.metrics.health_status = ConnectionStatus.UNHEALTHY
-            return # Stop initialization for this connection
-
         try:
             sync_url = self._get_connection_url(for_async=False)
-            
-            connect_args = {}
-            if self.config.db_type == DatabaseType.POSTGRES:
-                connect_args['connect_timeout'] = self.config.connect_timeout
+            connect_args = {'connect_timeout': self.config.connect_timeout} if self.config.db_type == DatabaseType.POSTGRES else {}
 
-            self.engine = create_engine(
-                sync_url,
-                poolclass=QueuePool,
-                pool_size=self.config.pool_size,
-                max_overflow=self.config.max_overflow,
-                pool_timeout=self.config.pool_timeout,
-                pool_recycle=self.config.pool_recycle,
-                pool_pre_ping=True,
-                connect_args=connect_args,
-                echo=False
-            )
+            self.engine = create_engine(sync_url, poolclass=QueuePool, pool_size=self.config.pool_size,
+                                      max_overflow=self.config.max_overflow, pool_timeout=self.config.pool_timeout,
+                                      pool_recycle=self.config.pool_recycle, pool_pre_ping=True,
+                                      connect_args=connect_args, echo=False)
+            
             self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
             self.scoped_session_factory = scoped_session(self.session_factory)
 
-            try:
-                async_url = self._get_connection_url(for_async=True)
-                self.async_engine = create_async_engine(
-                    async_url,
-                    pool_size=self.config.pool_size,
-                    max_overflow=self.config.max_overflow,
-                    pool_timeout=self.config.pool_timeout,
-                    pool_recycle=self.config.pool_recycle,
-                    pool_pre_ping=True,
-                    connect_args=connect_args,
-                    echo=False
-                )
-                self.async_session_factory = async_sessionmaker(
-                    bind=self.async_engine, class_=AsyncSession, autoflush=False, autocommit=False
-                )
-                logger.info(f"Async engine initialized for {self.config.name}")
-            except Exception as e:
-                logger.warning(f"Failed to create async engine for {self.config.name}: {e}. Async operations will not be available.")
-                self.async_engine = None
-                self.async_session_factory = None
+            async_url = self._get_connection_url(for_async=True)
+            self.async_engine = create_async_engine(async_url, pool_size=self.config.pool_size,
+                                                    max_overflow=self.config.max_overflow,
+                                                    pool_timeout=self.config.pool_timeout,
+                                                    pool_recycle=self.config.pool_recycle,
+                                                    pool_pre_ping=True, connect_args=connect_args,
+                                                    echo=False)
+            self.async_session_factory = async_sessionmaker(bind=self.async_engine, class_=AsyncSession,
+                                                          autoflush=False, autocommit=False)
             
             self._add_event_listeners()
             self._warm_connection_pool()
@@ -276,7 +253,7 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"Failed to initialize database connection for {self.config.name}: {e}", exc_info=True)
             self.metrics.health_status = ConnectionStatus.UNHEALTHY
-            self.metrics.failed_connection_attempts +=1
+            self.metrics.failed_connection_attempts += 1
     
     def _add_event_listeners(self):
         if not self.engine: return

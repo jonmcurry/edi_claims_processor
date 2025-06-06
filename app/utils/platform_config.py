@@ -1,142 +1,60 @@
 # app/utils/platform_config.py
 """
-Cross-platform configuration and event loop setup.
-Handles Windows/Linux differences for optimal performance.
+Platform-specific configuration and optimizations for Windows, Linux, and macOS.
 """
-import sys
-import asyncio
 import os
-from app.utils.logging_config import get_logger
-
-logger = get_logger('app.platform_config')
-
-def setup_optimal_event_loop():
-    """
-    Configures the optimal event loop for the current platform.
-    - Linux/macOS: Uses uvloop if available
-    - Windows: Uses winloop if available, falls back to ProactorEventLoop
-    """
-    if sys.platform == "win32":
-        # Windows-specific event loop setup
-        logger.info("Setting up event loop for Windows platform")
-        
-        # Try winloop first (high-performance Windows event loop)
-        try:
-            import winloop
-            asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
-            logger.info("Using winloop event loop policy for Windows")
-            return "winloop"
-        except ImportError:
-            logger.info("winloop not available, using Windows ProactorEventLoop")
-            # Use ProactorEventLoop for better I/O performance on Windows
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-            return "proactor"
-    
-    else:
-        # Unix-like systems (Linux, macOS)
-        logger.info(f"Setting up event loop for {sys.platform} platform")
-        
-        # Try uvloop first (high-performance Unix event loop)
-        try:
-            import uvloop
-            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-            logger.info("Using uvloop event loop policy for Unix")
-            return "uvloop"
-        except ImportError:
-            logger.info("uvloop not available, using default asyncio event loop")
-            return "default"
-
-def get_optimal_worker_count():
-    """
-    Returns the optimal number of workers based on platform and CPU count.
-    """
-    cpu_count = os.cpu_count() or 1
-    
-    if sys.platform == "win32":
-        # Windows: More conservative with process workers due to overhead
-        # Use ThreadPoolExecutor for I/O bound tasks
-        return min(cpu_count, 8)
-    else:
-        # Unix: Can handle more process workers efficiently
-        return min(cpu_count * 2, 16)
-
-def get_platform_specific_config():
-    """
-    Returns platform-specific configuration adjustments.
-    """
-    config = {
-        "event_loop": setup_optimal_event_loop(),
-        "max_workers": get_optimal_worker_count(),
-        "platform": sys.platform,
-        "supports_fork": hasattr(os, 'fork'),
-        "preferred_executor": "thread" if sys.platform == "win32" else "process"
-    }
-    
-    # Platform-specific database settings
-    if sys.platform == "win32":
-        config.update({
-            "db_pool_pre_ping": True,  # More important on Windows
-            "db_pool_recycle": 1800,   # More frequent recycling
-            "file_separator": "\\",
-            "use_multiprocessing": False  # Prefer threading on Windows
-        })
-    else:
-        config.update({
-            "db_pool_pre_ping": True,
-            "db_pool_recycle": 3600,   # Less frequent recycling on Unix
-            "file_separator": "/",
-            "use_multiprocessing": True   # Can use multiprocessing efficiently
-        })
-    
-    logger.info(f"Platform configuration: {config}")
-    return config
-
-# Global platform configuration
-PLATFORM_CONFIG = get_platform_specific_config()
-HAS_PLATFORM_CONFIG = True # This flag indicates the module was successfully imported
+import sys
+import multiprocessing
+import asyncio
+from typing import Dict, Any
 
 def configure_multiprocessing():
-    """
-    Configures multiprocessing for cross-platform compatibility.
-    """
+    """Configure multiprocessing for the current platform."""
     if sys.platform == "win32":
-        import multiprocessing
-        # Required for Windows when using multiprocessing
+        # Windows-specific multiprocessing setup
         multiprocessing.freeze_support()
-        
-        # Set start method to 'spawn' for Windows compatibility
         try:
             multiprocessing.set_start_method('spawn', force=True)
         except RuntimeError:
-            # Already set
-            pass
-    
-    logger.info("Multiprocessing configured for platform compatibility")
+            pass  # Already set
+        
+        # Configure event loop policy for Windows
+        try:
+            import winloop
+            asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
+        except ImportError:
+            # Fall back to ProactorEventLoop for better Windows support
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    else:
+        # Unix-like systems (Linux, macOS)
+        try:
+            # Try to use fork if available (more efficient)
+            multiprocessing.set_start_method('fork', force=True)
+        except (RuntimeError, ValueError):
+            try:
+                # Fall back to spawn
+                multiprocessing.set_start_method('spawn', force=True)
+            except RuntimeError:
+                pass  # Already set
+        
+        # Try to use uvloop for better performance on Unix
+        try:
+            import uvloop
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        except ImportError:
+            pass  # Use default event loop
 
-# Updated app/api/main.py startup section
-"""
-Add this to your app/api/main.py before creating the FastAPI app:
+# Platform configuration
+PLATFORM_CONFIG: Dict[str, Any] = {
+    "platform": sys.platform,
+    "max_workers": min(os.cpu_count() or 4, 16 if sys.platform != "win32" else 8),
+    "preferred_executor": "process" if sys.platform != "win32" else "thread",
+    "use_multiprocessing": sys.platform != "win32",  # More conservative on Windows
+    "supports_fork": hasattr(os, 'fork') and sys.platform != "win32",
+    "supports_uvloop": sys.platform != "win32",
+    "default_connection_timeout": 30 if sys.platform == "win32" else 15,
+    "default_pool_size": 8 if sys.platform == "win32" else 15,
+}
 
-from app.utils.platform_config import setup_optimal_event_loop, PLATFORM_CONFIG
-
-# Setup optimal event loop for the platform
-event_loop_type = setup_optimal_event_loop()
-logger.info(f"Configured {event_loop_type} event loop for platform {PLATFORM_CONFIG['platform']}")
-"""
-
-# Updated app/main.py startup section
-"""
-Add this to your app/main.py at the beginning of main():
-
-from app.utils.platform_config import configure_multiprocessing, PLATFORM_CONFIG
-
-def main():
-    # Configure platform-specific settings
-    configure_multiprocessing()
-    
-    overall_cid = set_correlation_id("EDI_PROC_APP_RUN") 
-    logger.info(f"[{overall_cid}] EDI Claims Processor starting on {PLATFORM_CONFIG['platform']}")
-    logger.info(f"Platform config: {PLATFORM_CONFIG}")
-    
-    # ... rest of your main() function
-"""
+# Mark that platform config is available
+HAS_PLATFORM_CONFIG = True
