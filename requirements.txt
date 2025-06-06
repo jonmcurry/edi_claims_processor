@@ -9,6 +9,7 @@
 # python -m uv pip install -r .\requirements.txt
 # For local development, it is recommended to use 'poetry install'.
 # --- Core Application Dependencies ---
+slowapi>=0.1.0
 python-dotenv>=1.0.0
 PyYAML>=6.0
 SQLAlchemy>=2.0.0

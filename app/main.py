@@ -3,6 +3,7 @@
 Main FastAPI application setup for the EDI Claims Processor API.
 This API serves the Failed Claims UI and potentially other external interactions.
 Optimized version with rate limiting, async middleware, response caching, and monitoring.
+py -m app.main --run_all_processing 
 """
 import time
 import sys
