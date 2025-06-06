@@ -1,212 +1,107 @@
-# requirements.txt
-# Python package dependencies for the EDI Claims Processor project
-# Updated for production deployment with performance optimizations
-# --- Core Libraries ---
-python-dotenv>=1.0.0         # For managing environment variables (especially for secrets not in config.yaml)
-PyYAML>=6.0                   # For reading and parsing config.yaml
-
-# --- Database Interaction ---
-SQLAlchemy>=1.4,<2.0         # Core ORM Toolkit. Specify version range for stability.
-psycopg2-binary>=2.9.5       # PostgreSQL database adapter
-pyodbc>=4.0.35               # ODBC database adapter (for SQL Server)
-
-# --- Async Database Drivers (Production Critical) ---
-asyncpg>=0.28.0              # Async PostgreSQL driver for high-performance operations
-aioodbc>=0.4.0               # Async ODBC driver for SQL Server
-aiopg>=1.4.0                 # Alternative async PostgreSQL adapter
-
-# --- Database Migrations & Management ---
-alembic>=1.12.0              # For database migrations (highly recommended for production)
-
-# --- Web API (FastAPI) ---
-fastapi>=0.104.0             # Modern, fast web framework for building APIs
-uvicorn[standard]>=0.24.0    # ASGI server to run FastAPI (includes websockets, http-tools, etc.)
-gunicorn>=21.2.0             # Production WSGI server for deployment
-
-# --- Production ASGI/WSGI Servers ---
-hypercorn>=0.15.0            # Alternative ASGI server with HTTP/2 support
-daphne>=4.0.0                # Django Channels ASGI server
-gevent>=23.9.0               # Gevent for async processing capabilities
-
-# --- Platform-Specific Dependencies ---
-# uvloop is Linux/macOS only - install conditionally
-# uvloop>=0.19.0; sys_platform != "win32" # Ultra fast asyncio event loop (Unix only)
-winloop>=0.1.0; sys_platform == "win32"  # Windows alternative to uvloop
-
-# --- Data Validation & Serialization ---
-pydantic>=1.8,<2.0           # Data validation and settings management using Python type hints
-
-# --- Data Handling & Machine Learning ---
-pandas>=2.0.0                # Powerful data analysis and manipulation library (for RVU data, ML features)
-numpy>=1.24.0                # Fundamental package for scientific computing (often a pandas/scikit-learn dependency)
-scikit-learn>=1.3.0          # Machine learning library (for the example classifier, preprocessing, metrics)
-joblib>=1.3.0                # For saving and loading Python objects (e.g., scikit-learn models)
-
-# --- Performance Optimization Libraries ---
-cython>=3.0.0                # For performance-critical code compilation
-numba>=0.58.0                # JIT compiler for numerical functions
-orjson>=3.9.0                # Ultra-fast JSON library (much faster than standard json)
-msgpack>=1.0.7               # Efficient binary serialization format
-lz4>=4.3.0                   # Fast compression for caching and data transfer
-
-# --- Asynchronous Operations & HTTP Clients ---
-httpx>=0.25.0                # A fully featured HTTP client for Python 3, with sync and async capabilities
-aiohttp>=3.9.0               # Async HTTP client/server framework
-aiofiles>=23.2.0             # Async file operations
-asyncio-throttle>=1.0.2      # Rate limiting for async operations
-
-# --- Caching & Memory Management ---
-redis>=5.0.0                 # Redis client for distributed caching
-aioredis>=2.0.0              # Async Redis client
-diskcache>=5.6.0             # Disk-based caching solution
-memory-profiler>=0.61.0      # Memory usage profiling
-
-# --- Connection Pooling & Database Performance ---
-SQLAlchemy-Utils>=0.41.0     # Additional utilities for SQLAlchemy
-psycopg2-pool>=1.1           # Connection pooling for PostgreSQL
-
-# --- Monitoring & Observability ---
-prometheus-client>=0.19.0    # Prometheus metrics collection
-sentry-sdk[sqlalchemy,fastapi]>=1.38.0  # Error tracking and performance monitoring
-structlog>=23.2.0            # Structured logging
-loguru>=0.7.0                # Enhanced logging with better performance
-opencensus>=0.11.0           # Distributed tracing
-jaeger-client>=4.8.0         # Jaeger tracing client
-python-json-logger
-
-# --- Health Checks & Service Discovery ---
-health-check>=1.3.3          # Health check endpoints
-consul-python>=1.1.0         # Service discovery with Consul
-etcd3>=0.12.0                # Distributed configuration management
-
-# --- Security & Authentication ---
-cryptography>=41.0.0         # Cryptographic operations for PII/PHI protection
-bcrypt>=4.0.0                # Password hashing
-python-jose[cryptography]>=3.3.0  # JWT token handling
-passlib[bcrypt]>=1.7.4       # Password hashing utilities
-pyotp>=2.9.0                 # One-time passwords for 2FA
-
-# --- Configuration Management ---
-python-decouple>=3.8         # Environment-based configuration
-dynaconf>=3.2.0              # Advanced configuration management
-click>=8.1.0                 # Command-line interface creation
-
-# --- Data Processing & ETL ---
-apache-airflow>=2.7.0        # Workflow orchestration (optional, for complex ETL)
-celery[redis]>=5.3.0         # Distributed task queue
-kombu>=5.3.0                 # Messaging library for Celery
-flower>=2.0.0                # Celery monitoring tool
-
-# --- Message Queues & Event Streaming ---
-pika>=1.3.0                  # RabbitMQ client
-kafka-python>=2.0.2          # Apache Kafka client
-nats-py>=2.6.0               # NATS messaging system
-
-# --- File Processing & Compression ---
-pyarrow>=14.0.0              # Columnar data processing
-parquet>=1.3.1               # Parquet file format support
-h5py>=3.10.0                 # HDF5 file format for large datasets
-blosc>=1.11.0                # High-performance compression
-
-# --- API Documentation & Testing ---
-swagger-ui-bundle>=0.0.9     # Swagger UI for API documentation
-redoc>=2.1.0                 # Alternative API documentation
-pytest>=7.4.0               # Testing framework
-pytest-asyncio>=0.21.0      # Async testing support
-pytest-cov>=4.1.0           # Coverage reporting
-httpx-mock>=0.10.0          # HTTP mocking for tests
-factory-boy>=3.3.0          # Test data generation
-
-# --- Development & Code Quality ---
-black>=23.0.0                # Uncompromising Python code formatter
-flake8>=6.1.0                # Linter for style guide enforcement
-mypy>=1.7.0                  # Optional static type checker
-bandit>=1.7.0                # Security linter
-safety>=2.3.0                # Dependency vulnerability scanner
-pre-commit>=3.5.0            # Git pre-commit hooks
-
-# --- Profiling & Performance Analysis ---
-py-spy>=0.3.14               # Sampling profiler for Python programs
-scalene>=1.5.26              # High-performance CPU and memory profiler
-line-profiler>=4.1.0         # Line-by-line profiling
-pympler>=0.9                 # Memory analysis tools
-
-# --- System Monitoring ---
-psutil>=5.9.0                # System and process monitoring
-GPUtil>=1.4.0                # GPU monitoring (if using GPU for ML)
-nvidia-ml-py>=12.535.0       # NVIDIA GPU monitoring
-
-# --- Production Utilities ---
-supervisor>=4.2.5            # Process control system
-systemd-python>=235          # Systemd integration
-setproctitle>=1.3.3          # Process title modification
-python-daemon>=3.0.1         # Daemonization support
-cryptography>=3.4.0          # For secure daemon operations
+# Create the virtual environment
+# python -m venv venv
+#
+# Activate the virtual environment
+# .\venv\Scripts\activate
+#
+# Run code:
+# pip install uv
+# python -m uv pip install -r .\requirements.txt
+# For local development, it is recommended to use 'poetry install'.
+# --- Core Application Dependencies ---
+python-dotenv>=1.0.0
+PyYAML>=6.0
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.5
+pyodbc>=4.0.35
+asyncpg>=0.28.0
+aioodbc>=0.4.0
+aiopg>=1.4.0
+alembic>=1.12.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+hypercorn>=0.15.0
+waitress>=2.1.2
+daphne>=4.0.0
+gevent>=23.9.0
+winloop>=0.1.0
+pydantic>=1.8,<2.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+cython>=3.0.0
+numba>=0.58.0
+orjson>=3.9.0
+msgpack>=1.0.7
+lz4>=4.3.0
+httpx>=0.25.0
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+asyncio-throttle>=1.0.2
+redis>=5.0.0
+aioredis>=2.0.0
+diskcache>=5.6.0
+SQLAlchemy-Utils>=0.41.0
+psycopg2-pool>=1.1
+prometheus-client>=0.19.0
+sentry-sdk[sqlalchemy,fastapi]>=1.38.0
+structlog>=23.2.0
+loguru>=0.7.0
+opencensus>=0.11.0
+jaeger-client>=4.8.0
+python-json-logger>=2.0.7
+healthcheck>=1.3.3
+python-consul>=1.1.0
+etcd3>=0.12.0
+cryptography>=41.0.0
+bcrypt>=4.0.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+pyotp>=2.9.0
+python-decouple>=3.8
+dynaconf>=3.2.0
+click>=8.1.0
+pika>=1.3.0
+kafka-python>=2.0.2
+nats-py>=2.6.0
+pyarrow>=14.0.0
+blosc>=1.11.0
+setproctitle>=1.3.3
+python-daemon>=3.0.1
 pymemcache
+marshmallow>=3.20.0
+cerberus>=1.3.5
+jsonschema>=4.20.0
+boto3>=1.34.0
+azure-storage-blob>=12.19.0
+google-cloud-storage>=2.10.0
+networkx>=3.2.1
+graphviz>=0.20.1
+pyDatalog>=0.17.1
+psutil>=5.9.0
 
-# --- Data Validation & Serialization (Enhanced) ---
-marshmallow>=3.20.0          # Object serialization/deserialization
-cerberus>=1.3.5              # Data validation
-jsonschema>=4.20.0           # JSON schema validation
-
-# --- Networking & Load Balancing ---
-haproxy-stats>=2.0.0         # HAProxy statistics
-nginx-python>=1.1.0          # Nginx integration utilities
-
-# --- Container & Deployment ---
-docker>=6.1.0                # Docker SDK for Python
-kubernetes>=28.1.0           # Kubernetes client library
-
-# --- Backup & Data Export ---
-boto3>=1.34.0                # AWS SDK for S3 backups
-azure-storage-blob>=12.19.0  # Azure Blob Storage
-google-cloud-storage>=2.10.0 # Google Cloud Storage
-
-# --- Additional ML & Data Science ---
-xgboost>=2.0.0               # Gradient boosting framework
-lightgbm>=4.1.0              # Light Gradient Boosting Machine
-catboost>=1.2.0              # Categorical boosting
-optuna>=3.4.0                # Hyperparameter optimization
-mlflow>=2.8.0                # ML lifecycle management
-
-# --- Time Series & Financial Calculations ---
-pandas-ta>=0.3.14b0          # Technical analysis indicators
-QuantLib-Python>=1.32       # Quantitative finance library (if needed for complex calculations)
-
-# --- Graph & Network Analysis (for dependency mapping) ---
-networkx>=3.2.1              # Graph analysis library
-graphviz>=0.20.1             # Graph visualization
-
-# --- Geospatial (if facility location analysis needed) ---
-geopandas>=0.14.0            # Geospatial data analysis
-shapely>=2.0.0               # Geometric objects manipulation
-
-# --- Communication & Notifications ---
-slack-sdk>=3.23.0            # Slack notifications
-twilio>=8.10.0               # SMS/phone notifications
-sendgrid>=6.10.0             # Email notifications
-
-# --- Data Streaming & Real-time Processing ---
-apache-beam[gcp]>=2.52.0     # Unified stream and batch processing
-streamz>=0.6.4               # Real-time stream processing
-
-# --- Rules Engine ---
-pyDatalog>=0.17.1            # For implementing the rules engine using Datalog logic
-
-# --- Configuration for specific deployment scenarios ---
-# Uncomment based on your deployment target:
-# --- For Kubernetes deployments ---
-# kubernetes-asyncio>=24.2.0
-# kopf>=1.36.0 # Kubernetes operators framework
-# --- For AWS deployments ---
-# boto3>=1.34.0
-# botocore>=1.34.0
-# awscli>=1.32.0
-# --- For Azure deployments ---
-# azure-identity>=1.15.0
-# azure-keyvault-secrets>=4.7.0
-# azure-servicebus>=7.11.0
-# --- For Google Cloud deployments ---
-# google-cloud-secret-manager>=2.18.0
-# google-cloud-pubsub>=2.18.0
-# google-cloud-monitoring>=2.16.0
+# --- Development and Testing Dependencies ---
+# To install, run: pip install -r requirements.txt -r requirements-dev.txt
+# (Assuming you separate dev dependencies into a separate file)
+# ---
+memory-profiler>=0.61.0
+swagger-ui-bundle>=0.0.9
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-httpx>=0.10.0
+factory-boy>=3.3.0
+black>=23.0.0
+flake8>=6.1.0
+mypy>=1.7.0
+bandit>=1.7.0
+safety>=2.3.0
+pre-commit>=3.5.0
+py-spy>=0.3.14
+scalene>=1.5.26
+line-profiler>=4.1.0
+pympler>=0.9
+GPUtil>=1.4.0
+nvidia-ml-py>=12.535.0

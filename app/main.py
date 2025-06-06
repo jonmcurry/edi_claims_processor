@@ -1,254 +1,567 @@
-# app/main.py
+# app/api/main.py
 """
-Main application entry point for the EDI Claims Processor.
-Orchestrates the overall workflow:
-1. Initialize logging, configurations, and database connections (with pool warming).
-2. Initialize monitoring services.
-3. Initiate batch processing of staged claims from the PostgreSQL database.
-   - Batch processor fetches claims and uses ClaimsProcessor for each.
-   - ClaimsProcessor handles validation, ML prediction, reimbursement, and saving to production/failed logs.
-4. Ensure graceful shutdown of all resources.
+Main FastAPI application setup for the EDI Claims Processor API.
+This API serves the Failed Claims UI and potentially other external interactions.
+Optimized version with rate limiting, async middleware, response caching, and monitoring.
 """
-import os
-import sys
 import time
-import argparse
+import sys
 import asyncio
-import multiprocessing
+from typing import Dict, Any
+from datetime import datetime, timedelta
 
-# Ensure app directory is in Python path (if running main.py directly from project root)
-# current_dir = os.path.dirname(os.path.abspath(__file__))
-# project_root = os.path.abspath(os.path.join(current_dir, '..'))
-# if project_root not in sys.path:
-#    sys.path.insert(0, project_root)
+from fastapi import FastAPI, Request, Response, status, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
+# Third-party middleware and dependencies
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    RATE_LIMITING_AVAILABLE = True
+except ImportError:
+    RATE_LIMITING_AVAILABLE = False
+
+import redis.asyncio as redis
+from contextlib import asynccontextmanager
+import json
+import hashlib
+
+# Internal imports
+from app.api import endpoints as api_endpoints
 from app.utils.logging_config import setup_logging, get_logger, set_correlation_id, get_correlation_id
-from app.utils.error_handler import AppException, ConfigError, handle_exception
-from app.database.connection_manager import (
-    init_database_connections, dispose_engines,
-    get_postgres_session,
-    get_sqlserver_session,
-    CONFIG as APP_CONFIG
+from app.utils.error_handler import APIError, AppException
+from app.database.connection_manager import init_database_connections, dispose_engines, CONFIG as APP_CONFIG
+
+# Setup logging first
+setup_logging()
+logger = get_logger('app.api.main')
+
+# --- Application Lifespan Management ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manages application startup and shutdown events."""
+    startup_cid = set_correlation_id("API_STARTUP")
+    logger.info(f"[{startup_cid}] FastAPI application startup...")
+    
+    try:
+        # Initialize database connections
+        init_database_connections()
+        logger.info("Database connections initialized for API.")
+        
+        # Initialize Redis cache if configured
+        if app.state.cache_enabled:
+            try:
+                app.state.redis_client = redis.from_url(
+                    app.state.redis_url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    socket_connect_timeout=5,
+                    socket_timeout=5,
+                    retry_on_timeout=True,
+                    health_check_interval=30
+                )
+                # Test connection
+                await app.state.redis_client.ping()
+                logger.info(f"Redis cache connected: {app.state.redis_url}")
+            except Exception as e:
+                logger.warning(f"Redis cache connection failed: {e}. Disabling cache.")
+                app.state.cache_enabled = False
+                app.state.redis_client = None
+        
+        # Initialize metrics collection
+        app.state.metrics = {
+            "requests_total": 0,
+            "requests_by_endpoint": {},
+            "response_times": [],
+            "errors_total": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "startup_time": datetime.utcnow()
+        }
+        
+        logger.info("FastAPI application startup complete.")
+        yield
+        
+    except Exception as e:
+        logger.critical(f"Failed to initialize application during startup: {e}", exc_info=True)
+        raise
+    finally:
+        # Shutdown
+        shutdown_cid = set_correlation_id("API_SHUTDOWN")
+        logger.info(f"[{shutdown_cid}] FastAPI application shutdown...")
+        
+        # Close Redis connection
+        if hasattr(app.state, 'redis_client') and app.state.redis_client:
+            try:
+                await app.state.redis_client.close()
+                logger.info("Redis connection closed.")
+            except Exception as e:
+                logger.warning(f"Error closing Redis connection: {e}")
+        
+        # Dispose database engines
+        dispose_engines()
+        logger.info("Database engines disposed.")
+        
+        # Log final metrics
+        if hasattr(app.state, 'metrics'):
+            uptime = datetime.utcnow() - app.state.metrics["startup_time"]
+            logger.info(f"API session metrics - Uptime: {uptime}, "
+                       f"Total requests: {app.state.metrics['requests_total']}, "
+                       f"Total errors: {app.state.metrics['errors_total']}, "
+                       f"Cache hit ratio: {app.state.metrics['cache_hits']}/{app.state.metrics['cache_hits'] + app.state.metrics['cache_misses']}")
+        
+        logger.info("FastAPI application shutdown complete.")
+
+# --- Rate Limiter Setup ---
+if RATE_LIMITING_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address)
+else:
+    limiter = None
+    logger.warning("slowapi not available. Rate limiting disabled. Install with: pip install slowapi")
+
+# --- FastAPI App Initialization ---
+app_config = APP_CONFIG.get('api', {})
+cache_config = APP_CONFIG.get('caching', {})
+
+app = FastAPI(
+    title="EDI Claims Processor API",
+    description="Optimized API for managing and viewing EDI claims processing, focusing on failed claims and analytics.",
+    version="1.0.0",
+    lifespan=lifespan,
+    # Enable automatic API documentation
+    docs_url="/docs",
+    openapi_url="/openapi.json"
 )
-# The edi_parser module is no longer needed as we are not processing files.
-# from app.processing.edi_parser import process_edi_file 
-from app.processing.batch_handler import OptimizedPipelineProcessor
-from app.utils.platform_config import PLATFORM_CONFIG, configure_multiprocessing as configure_platform_mp, HAS_PLATFORM_CONFIG
 
-from app.database.postgres_handler import create_db_processing_batch
+# --- Application State Configuration ---
+app.state.cache_enabled = cache_config.get('api_cache_enabled', True)
+app.state.redis_url = cache_config.get('redis_url', 'redis://localhost:6379/0')
+app.state.cache_ttl = cache_config.get('api_cache_ttl_seconds', 300)  # 5 minutes default
 
-# Monitoring imports
-from app.utils.metrics import get_metrics_collector
-from app.monitoring.performance_monitor import PerformanceMonitor
-from app.monitoring.health_checker import HealthChecker
-from app.monitoring.alert_manager import AlertManager
-from app.utils.caching import shutdown_caches
+# --- Middleware Setup ---
 
-# Setup initial logging as early as possible
-setup_logging() 
-logger = get_logger('app.main')
+# Security Middleware - Trusted Hosts
+trusted_hosts = app_config.get('trusted_hosts', ['localhost', '127.0.0.1', '*'])
+if '*' not in trusted_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
-# Global references to monitoring components for graceful shutdown
-metrics_collector_instance = None
-performance_monitor_instance = None
-alert_manager_instance = None
-pipeline_processor_instance = None # For OptimizedPipelineProcessor
+# Compression Middleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-def initialize_monitoring_services(config: dict):
-    """Initializes and starts monitoring services."""
-    global metrics_collector_instance, performance_monitor_instance, alert_manager_instance
-    cid = get_correlation_id()
-    logger.info(f"[{cid}] Initializing monitoring services...")
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=app_config.get('cors_origins', ["*"]),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Correlation-ID", "X-Cache-Status", "X-Response-Time"]
+)
+
+# Rate Limiting Middleware
+if RATE_LIMITING_AVAILABLE:
+    app.state.limiter = limiter
+    app.add_middleware(SlowAPIMiddleware)
+
+# --- Custom Async Middleware ---
+
+@app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    """Adds correlation ID and tracks request metrics."""
+    start_time = time.time()
+    
+    # Set correlation ID
+    cid_header = request.headers.get("X-Correlation-ID")
+    cid = set_correlation_id(cid_header)
+    
+    # Track request
+    app.state.metrics["requests_total"] += 1
+    endpoint = f"{request.method} {request.url.path}"
+    app.state.metrics["requests_by_endpoint"][endpoint] = app.state.metrics["requests_by_endpoint"].get(endpoint, 0) + 1
+    
+    logger.info(f"[{cid}] Incoming request: {endpoint} from {request.client.host if request.client else 'unknown'}")
+    
     try:
-        metrics_collector_instance = get_metrics_collector(config)
-        if metrics_collector_instance and config.get('metrics',{}).get('auto_start_background', True):
-            metrics_collector_instance.start_background_processing()
-            logger.info(f"[{cid}] MetricsCollector background processing started.")
-
-        performance_monitor_instance = PerformanceMonitor(config)
-        if performance_monitor_instance and config.get('monitoring',{}).get('system_monitoring_enabled', True):
-            logger.info(f"[{cid}] PerformanceMonitor system monitoring started.")
-
-        health_checker_instance = HealthChecker(config)
-
-        alert_manager_instance = AlertManager(config, health_checker_instance, performance_monitor_instance)
-        if alert_manager_instance and config.get('alerting',{}).get('auto_start_monitoring', True):
-            logger.info(f"[{cid}] AlertManager monitoring started.")
+        response = await call_next(request)
         
-        logger.info(f"[{cid}] Monitoring services initialized.")
+        # Calculate response time
+        process_time = time.time() - start_time
+        app.state.metrics["response_times"].append(process_time)
+        
+        # Keep only last 1000 response times for memory management
+        if len(app.state.metrics["response_times"]) > 1000:
+            app.state.metrics["response_times"] = app.state.metrics["response_times"][-1000:]
+        
+        # Add headers
+        response.headers["X-Correlation-ID"] = cid
+        response.headers["X-Response-Time"] = f"{process_time:.4f}s"
+        
+        logger.info(f"[{cid}] Response: {response.status_code} for {endpoint} in {process_time:.4f}s")
+        return response
+        
     except Exception as e:
-        logger.error(f"[{cid}] Failed to initialize one or more monitoring services: {e}", exc_info=True)
+        app.state.metrics["errors_total"] += 1
+        process_time = time.time() - start_time
+        logger.error(f"[{cid}] Request failed: {endpoint} in {process_time:.4f}s - {str(e)}")
+        raise
 
-def shutdown_monitoring_services():
-    """Gracefully shuts down monitoring services."""
-    cid = get_correlation_id()
-    logger.info(f"[{cid}] Shutting down monitoring services...")
-    if metrics_collector_instance:
-        try:
-            metrics_collector_instance.stop_background_processing()
-            logger.info(f"[{cid}] MetricsCollector background processing stopped.")
-        except Exception as e:
-            logger.warning(f"[{cid}] Error stopping MetricsCollector: {e}", exc_info=True)
-    if performance_monitor_instance:
-        try:
-            performance_monitor_instance.stop_system_monitoring()
-            logger.info(f"[{cid}] PerformanceMonitor system monitoring stopped.")
-        except Exception as e:
-            logger.warning(f"[{cid}] Error stopping PerformanceMonitor: {e}", exc_info=True)
-    if alert_manager_instance:
-        try:
-            alert_manager_instance.stop_monitoring()
-            logger.info(f"[{cid}] AlertManager monitoring stopped.")
-        except Exception as e:
-            logger.warning(f"[{cid}] Error stopping AlertManager: {e}", exc_info=True)
-    logger.info(f"[{cid}] Monitoring services shutdown complete.")
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Adds security headers to responses."""
+    response = await call_next(request)
+    
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Don't cache sensitive endpoints
+    if any(sensitive in request.url.path for sensitive in ['/failed-claims', '/analytics']):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    
+    return response
 
+# --- Caching Utilities ---
 
-async def start_claim_processing_pipeline(pg_session_factory, sql_session_factory, app_config):
-    """
-    Initiates the asynchronous batch processing pipeline for staged claims.
-    """
-    global pipeline_processor_instance
-    main_cid = get_correlation_id()
-    pipeline_run_cid = set_correlation_id(f"{main_cid}_PIPELINE_RUN")
-    logger.info(f"[{pipeline_run_cid}] Starting asynchronous claim batch processing pipeline.")
+async def get_cache_key(request: Request) -> str:
+    """Generate cache key for request."""
+    # Include method, path, and sorted query parameters
+    query_params = str(sorted(request.query_params.items()))
+    cache_data = f"{request.method}:{request.url.path}:{query_params}"
+    return f"api_cache:{hashlib.md5(cache_data.encode()).hexdigest()}"
 
-    pipeline_processor_instance = OptimizedPipelineProcessor(pg_session_factory, sql_session_factory, app_config)
+async def get_cached_response(request: Request) -> Dict[str, Any] | None:
+    """Get cached response if available."""
+    if not app.state.cache_enabled or not hasattr(app.state, 'redis_client') or not app.state.redis_client:
+        return None
     
     try:
-        await pipeline_processor_instance.run_pipeline()
-        logger.info(f"[{pipeline_run_cid}] Asynchronous claim batch processing pipeline completed.")
-    except asyncio.CancelledError:
-        logger.info(f"[{pipeline_run_cid}] Claim processing pipeline was cancelled.")
+        cache_key = await get_cache_key(request)
+        cached_data = await app.state.redis_client.get(cache_key)
+        
+        if cached_data:
+            app.state.metrics["cache_hits"] += 1
+            return json.loads(cached_data)
+        else:
+            app.state.metrics["cache_misses"] += 1
+            return None
+            
     except Exception as e:
-        logger.critical(f"[{pipeline_run_cid}] Unhandled exception during claim batch processing pipeline: {e}", exc_info=True)
-        if pipeline_processor_instance and not pipeline_processor_instance.shutdown_event.is_set():
-            await pipeline_processor_instance.stop_pipeline()
-    finally:
-        logger.info(f"[{pipeline_run_cid}] Pipeline processing finalization.")
-        set_correlation_id(main_cid)
+        logger.warning(f"Cache read error: {e}")
+        app.state.metrics["cache_misses"] += 1
+        return None
 
-async def main_async_wrapper(args):
-    """Wraps the main logic to be run by asyncio.run() for pipeline processing."""
-    overall_cid = get_correlation_id()
-
-    pg_session_factory = lambda read_only=False: get_postgres_session(read_only=read_only)
-    sql_session_factory = lambda read_only=False: get_sqlserver_session(read_only=read_only)
-
-    # The file ingestion logic has been removed. The pipeline will start processing directly from the database.
-    if args.run_batch_processing or args.run_all_processing:
-        logger.info("--- Starting Claim Batch Processing Pipeline ---")
-        await start_claim_processing_pipeline(pg_session_factory, sql_session_factory, APP_CONFIG)
-        logger.info("--- Claim Batch Processing Pipeline Completed ---")
-
-
-def main():
-    """
-    Main entry point for the application.
-    Parses command line arguments and orchestrates the processing flow.
-    """
-    overall_cid = set_correlation_id("EDI_PROC_APP_RUN_MAIN") 
-    logger.info(f"[{overall_cid}] EDI Claims Processor application starting...")
+async def set_cached_response(request: Request, response_data: Dict[str, Any], ttl: int = None):
+    """Cache response data."""
+    if not app.state.cache_enabled or not hasattr(app.state, 'redis_client') or not app.state.redis_client:
+        return
     
-    if HAS_PLATFORM_CONFIG:
-        logger.info(f"Running with platform-specific configurations from app.utils.platform_config: {PLATFORM_CONFIG}")
-        configure_platform_mp()
+    try:
+        cache_key = await get_cache_key(request)
+        ttl = ttl or app.state.cache_ttl
+        await app.state.redis_client.setex(
+            cache_key, 
+            ttl, 
+            json.dumps(response_data, default=str)  # default=str handles datetime serialization
+        )
+    except Exception as e:
+        logger.warning(f"Cache write error: {e}")
+
+@app.middleware("http")
+async def caching_middleware(request: Request, call_next):
+    """Response caching middleware for GET requests."""
+    cid = get_correlation_id()
+    
+    # Only cache GET requests and specific endpoints
+    cacheable_endpoints = ['/failed-claims', '/analytics', '/status']
+    if (request.method != "GET" or 
+        not any(endpoint in request.url.path for endpoint in cacheable_endpoints)):
+        return await call_next(request)
+    
+    # Check cache
+    cached_response = await get_cached_response(request)
+    if cached_response:
+        logger.debug(f"[{cid}] Cache HIT for {request.url.path}")
+        response = JSONResponse(content=cached_response)
+        response.headers["X-Cache-Status"] = "HIT"
+        response.headers["X-Correlation-ID"] = cid
+        return response
+    
+    # Process request
+    logger.debug(f"[{cid}] Cache MISS for {request.url.path}")
+    response = await call_next(request)
+    
+    # Cache successful responses
+    if response.status_code == 200 and hasattr(response, 'body'):
+        try:
+            response_body = response.body.decode('utf-8')
+            response_data = json.loads(response_body)
+            
+            # Cache for different TTLs based on endpoint
+            ttl = app.state.cache_ttl
+            if 'analytics' in request.url.path:
+                ttl = 600  # 10 minutes for analytics
+            elif 'status' in request.url.path:
+                ttl = 60   # 1 minute for status
+            
+            await set_cached_response(request, response_data, ttl)
+            response.headers["X-Cache-Status"] = "MISS"
+            
+        except Exception as e:
+            logger.warning(f"[{cid}] Failed to cache response: {e}")
+            response.headers["X-Cache-Status"] = "ERROR"
+    
+    return response
+
+# --- Rate Limiting Error Handler ---
+if RATE_LIMITING_AVAILABLE:
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        cid = get_correlation_id()
+        logger.warning(f"[{cid}] Rate limit exceeded for {request.client.host if request.client else 'unknown'}: {request.url.path}")
+        
+        response = JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": f"Rate limit exceeded: {exc.detail}",
+                    "retry_after": getattr(exc, 'retry_after', 60),
+                    "correlation_id": cid
+                }
+            }
+        )
+        response.headers["Retry-After"] = str(getattr(exc, 'retry_after', 60))
+        return response
+
+# --- Custom Exception Handlers ---
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    cid = get_correlation_id()
+    logger.error(
+        f"[{cid}] AppException caught by API: {exc.message} (Code: {exc.error_code}, Category: {exc.category})",
+        exc_info=isinstance(exc, (APIError,)),
+        extra={"error_details": exc.details, "error_code": exc.error_code, "error_category": exc.category}
+    )
+    
+    status_code = 500
+    if isinstance(exc, APIError):
+        status_code = exc.status_code
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": exc.error_code,
+                "message": exc.message,
+                "category": exc.category,
+                "details": exc.details,
+                "correlation_id": cid,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        },
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    cid = get_correlation_id()
+    logger.warning(
+        f"[{cid}] Request validation error: {exc.errors()}",
+        extra={"validation_errors": exc.errors(), "request_path": request.url.path}
+    )
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": {
+                "code": "REQUEST_VALIDATION_ERROR",
+                "message": "Invalid request parameters.",
+                "details": exc.errors(),
+                "correlation_id": cid,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        },
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    cid = get_correlation_id()
+    app.state.metrics["errors_total"] += 1
+    logger.critical(
+        f"[{cid}] Unhandled generic exception caught by API: {str(exc)}",
+        exc_info=True,
+        extra={"request_path": request.url.path, "request_method": request.method}
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": {
+                "code": "UNEXPECTED_SERVER_ERROR",
+                "message": "An unexpected internal server error occurred.",
+                "details": {"exception_type": type(exc).__name__},
+                "correlation_id": cid,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        },
+    )
+
+# --- Health Check and Monitoring Endpoints ---
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Health check endpoint with detailed status."""
+    cid = set_correlation_id("HEALTH_CHECK")
+    
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": app.version,
+        "correlation_id": cid,
+        "checks": {}
+    }
+    
+    # Database connectivity check
+    try:
+        from app.database.connection_manager import check_postgres_connection, check_sqlserver_connection
+        health_status["checks"]["postgres"] = "healthy" if check_postgres_connection() else "unhealthy"
+        health_status["checks"]["sqlserver"] = "healthy" if check_sqlserver_connection() else "unhealthy"
+    except Exception as e:
+        health_status["checks"]["database"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Cache connectivity check
+    if app.state.cache_enabled and hasattr(app.state, 'redis_client') and app.state.redis_client:
+        try:
+            await app.state.redis_client.ping()
+            health_status["checks"]["cache"] = "healthy"
+        except Exception:
+            health_status["checks"]["cache"] = "unhealthy"
+            health_status["status"] = "degraded"
     else:
-        logger.warning("Platform configuration module not fully available. Using fallback multiprocessing setup.")
-        if sys.platform == "win32":
-            multiprocessing.freeze_support()
-
-    parser = argparse.ArgumentParser(description="EDI Claims Processor")
-    # Arguments related to file ingestion have been removed.
-    parser.add_argument("--run_batch_processing", action="store_true", help="Run the claim batch processing pipeline from the database.")
-    parser.add_argument("--run_api", action="store_true", help="Run the FastAPI API server for UI interaction.")
-    parser.add_argument("--run_all_processing", action="store_true", help="Run the full claim processing pipeline from the database.")
+        health_status["checks"]["cache"] = "disabled"
     
-    args = parser.parse_args()
+    # Overall status determination
+    if any(check == "unhealthy" for check in health_status["checks"].values()):
+        health_status["status"] = "unhealthy"
+    
+    status_code = 200 if health_status["status"] != "unhealthy" else 503
+    return JSONResponse(content=health_status, status_code=status_code)
 
-    action_specified = args.run_batch_processing or args.run_all_processing or args.run_api
-    if not action_specified:
-        logger.warning("No action specified. Use --run_batch_processing, --run_all_processing, or --run_api.")
-        parser.print_help()
-        sys.exit(1)
-        
+@app.get("/metrics", tags=["Monitoring"])
+@limiter.limit("10/minute") if RATE_LIMITING_AVAILABLE else lambda: None
+async def get_metrics(request: Request):
+    """API metrics endpoint."""
+    cid = set_correlation_id("METRICS_REQUEST")
+    
+    uptime = datetime.utcnow() - app.state.metrics["startup_time"]
+    response_times = app.state.metrics["response_times"]
+    
+    metrics = {
+        "uptime_seconds": uptime.total_seconds(),
+        "requests": {
+            "total": app.state.metrics["requests_total"],
+            "by_endpoint": app.state.metrics["requests_by_endpoint"],
+            "errors_total": app.state.metrics["errors_total"]
+        },
+        "performance": {
+            "avg_response_time": sum(response_times) / len(response_times) if response_times else 0,
+            "min_response_time": min(response_times) if response_times else 0,
+            "max_response_time": max(response_times) if response_times else 0,
+            "samples_count": len(response_times)
+        },
+        "cache": {
+            "enabled": app.state.cache_enabled,
+            "hits": app.state.metrics["cache_hits"],
+            "misses": app.state.metrics["cache_misses"],
+            "hit_ratio": app.state.metrics["cache_hits"] / (app.state.metrics["cache_hits"] + app.state.metrics["cache_misses"]) if (app.state.metrics["cache_hits"] + app.state.metrics["cache_misses"]) > 0 else 0
+        },
+        "timestamp": datetime.utcnow().isoformat(),
+        "correlation_id": cid
+    }
+    
+    return metrics
+
+# --- Cache Management Endpoints ---
+
+@app.post("/cache/clear", tags=["Cache Management"])
+@limiter.limit("5/minute") if RATE_LIMITING_AVAILABLE else lambda: None
+async def clear_cache(request: Request):
+    """Clear API response cache."""
+    cid = set_correlation_id("CACHE_CLEAR")
+    
+    if not app.state.cache_enabled or not hasattr(app.state, 'redis_client') or not app.state.redis_client:
+        raise HTTPException(status_code=503, detail="Cache not available")
+    
     try:
-        init_database_connections() 
-        logger.info(f"[{overall_cid}] Database connections initialized and pools warmed.")
-
-        initialize_monitoring_services(APP_CONFIG)
-
-        if args.run_api:
-            logger.info("--- Starting FastAPI API Server ---")
-            try:
-                import uvicorn
-                from app.api.main import app as fastapi_app
-                
-                api_host = APP_CONFIG.get('api',{}).get('host', '0.0.0.0')
-                api_port = APP_CONFIG.get('api',{}).get('port', 8000)
-                logger.info(f"Starting Uvicorn server for API on {api_host}:{api_port}...")
-                uvicorn.run(fastapi_app, host=api_host, port=api_port, lifespan="on")
-            except ImportError:
-                logger.error("Uvicorn or FastAPI is not installed. Cannot run the API server. Please install requirements.")
-                sys.exit(5)
-            except Exception as api_e:
-                logger.critical(f"Failed to start API server: {api_e}", exc_info=True)
-                sys.exit(6)
+        # Clear only API cache keys
+        keys = await app.state.redis_client.keys("api_cache:*")
+        if keys:
+            await app.state.redis_client.delete(*keys)
+            cleared_count = len(keys)
         else:
-            asyncio.run(main_async_wrapper(args))
-            logger.info(f"[{overall_cid}] EDI Claims Processor application tasks finished successfully.")
-
-    except ConfigError as ce:
-        logger.critical(f"[{overall_cid}] CRITICAL CONFIGURATION ERROR: {ce.message}", exc_info=True)
-        sys.exit(2)
-    except AppException as ae:
-        logger.critical(f"[{overall_cid}] CRITICAL APPLICATION ERROR: {ae.message} (Code: {ae.error_code})", exc_info=True)
-        sys.exit(3)
-    except KeyboardInterrupt:
-        logger.info(f"[{overall_cid}] Application interrupted by user (Ctrl+C). Initiating graceful shutdown...")
-        if pipeline_processor_instance and not pipeline_processor_instance.shutdown_event.is_set():
-            logger.info(f"[{overall_cid}] Attempting to stop pipeline processor due to KeyboardInterrupt...")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(pipeline_processor_instance.stop_pipeline())
-            except Exception as e_pipe_stop:
-                logger.error(f"[{overall_cid}] Error stopping pipeline processor during KeyboardInterrupt: {e_pipe_stop}")
-            finally:
-                loop.close()
-        sys.exit(130)
+            cleared_count = 0
+        
+        logger.info(f"[{cid}] Cleared {cleared_count} cache entries")
+        
+        return {
+            "message": f"Successfully cleared {cleared_count} cache entries",
+            "correlation_id": cid,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
     except Exception as e:
-        logger.critical(f"[{overall_cid}] AN UNEXPECTED CRITICAL ERROR OCCURRED IN MAIN: {e}", exc_info=True)
-        sys.exit(4)
-    finally:
-        shutdown_cid = set_correlation_id(f"{overall_cid}_SHUTDOWN")
-        logger.info(f"[{shutdown_cid}] Initiating final application shutdown procedures...")
-        
-        if pipeline_processor_instance and not args.run_api and not pipeline_processor_instance.shutdown_event.is_set():
-            logger.info(f"[{shutdown_cid}] Ensuring pipeline processor is stopped...")
-            try:
-                temp_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(temp_loop)
-                temp_loop.run_until_complete(pipeline_processor_instance.stop_pipeline())
-                temp_loop.close()
-            except RuntimeError:
-                 logger.warning(f"[{shutdown_cid}] Could not cleanly run stop_pipeline in a new loop during final shutdown.")
-            except Exception as e_final_stop:
-                logger.error(f"[{shutdown_cid}] Error during final stop of pipeline processor: {e_final_stop}")
+        logger.error(f"[{cid}] Failed to clear cache: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
 
-        shutdown_monitoring_services()
-        shutdown_caches()
+# --- Include API Routers ---
+app.include_router(api_endpoints.router, prefix="/api/v1")
 
-        if not args.run_api: 
-            dispose_engines() 
-        
-        logger.info(f"[{shutdown_cid}] Application shutdown process complete.")
-        set_correlation_id(overall_cid)
+# --- Root Endpoint ---
+@app.get("/", tags=["Root"])
+async def read_root():
+    """Root endpoint providing API information and status."""
+    cid = set_correlation_id("API_ROOT_GET")
+    
+    uptime = datetime.utcnow() - app.state.metrics["startup_time"] if hasattr(app.state, 'metrics') else timedelta(0)
+    
+    return {
+        "message": "Welcome to the EDI Claims Processor API!",
+        "version": app.version,
+        "status": "operational",
+        "uptime_seconds": uptime.total_seconds(),
+        "features": {
+            "rate_limiting": RATE_LIMITING_AVAILABLE,
+            "response_caching": app.state.cache_enabled,
+            "monitoring": True,
+            "async_processing": True
+        },
+        "endpoints": {
+            "documentation": "/docs",
+            "metrics": "/metrics",
+            "openapi": "/openapi.json"
+        },
+        "correlation_id": cid,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
+# --- Development Server (Optional) ---
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        if HAS_PLATFORM_CONFIG:
-            configure_platform_mp()
-        else:
-            multiprocessing.freeze_support() 
-    main()
+    import uvicorn
+    logger.info("Starting FastAPI server directly from api/main.py for development...")
+    uvicorn.run(
+        "app.api.main:app",
+        host=app_config.get('host', '0.0.0.0'),
+        port=app_config.get('port', 8000),
+        reload=True,  # Enable auto-reload for development
+        log_level="info",
+        access_log=True
+    )
+ 
