@@ -252,6 +252,7 @@ class DatabaseConnection:
             raise ConfigError(f"Unsupported database type: {db_type}")
 
     def _initialize_connection(self):
+        """Initializes the database connection, engine, and session factories."""
         logger.info(f"Initializing connection for {self.config.name}...")
         
         # Check if required drivers are available
@@ -263,32 +264,32 @@ class DatabaseConnection:
         try:
             sync_url = self._get_connection_url(for_async=False)
             logger.debug(f"Sync connection URL for {self.config.name}: {sync_url}")
-            
-            # Build connect_args based on database type
+
+            # Build engine and connection arguments dynamically
             connect_args = {}
+            engine_kwargs = {
+                "poolclass": QueuePool,
+                "pool_size": self.config.pool_size,
+                "max_overflow": self.config.max_overflow,
+                "pool_timeout": self.config.pool_timeout,
+                "pool_recycle": self.config.pool_recycle,
+                "pool_pre_ping": True,
+                "echo": False
+            }
+
             if self.config.db_type == DatabaseType.POSTGRES:
-                connect_args = {'connect_timeout': self.config.connect_timeout}
+                connect_args['connect_timeout'] = self.config.connect_timeout
             elif self.config.db_type == DatabaseType.SQLSERVER:
-                # SQL Server specific connection arguments
-                connect_args = {
-                    'timeout': self.config.connect_timeout,
-                    'autocommit': False
-                }
+                connect_args['timeout'] = self.config.connect_timeout
+                connect_args['autocommit'] = False
+                # Add SQL Server-specific engine argument
+                engine_kwargs['fast_executemany'] = True
             
-            self.engine = create_engine(
-                sync_url, 
-                poolclass=QueuePool, 
-                pool_size=self.config.pool_size,
-                max_overflow=self.config.max_overflow, 
-                pool_timeout=self.config.pool_timeout,
-                pool_recycle=self.config.pool_recycle, 
-                pool_pre_ping=True,
-                connect_args=connect_args, 
-                echo=False,
-                # Additional SQL Server optimizations
-                fast_executemany=True if self.config.db_type == DatabaseType.SQLSERVER else None
-            )
-            
+            engine_kwargs['connect_args'] = connect_args
+
+            # Create the engine with the appropriate arguments
+            self.engine = create_engine(sync_url, **engine_kwargs)
+
             self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
             self.scoped_session_factory = scoped_session(self.session_factory)
 
@@ -661,3 +662,4 @@ try:
     CONFIG = db_manager._config
 except (ConfigError, FileNotFoundError):
     logger.warning("Could not load CONFIG from connection_manager; it may not be initialized yet.")
+
