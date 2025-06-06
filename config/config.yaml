@@ -19,7 +19,7 @@ postgres_staging:
   port: "${PG_PORT:-5432}"
   database: "${PG_DATABASE:-edi_staging}"
   user: "${PG_USER:-postgres}"
-  password: "${PG_PASSWORD:-admin}" # Use environment variables for passwords in production
+  password: "${PG_PASSWORD:-ClearToFly1}" # Use environment variables for passwords in production
   
   # Connection Pool Settings
   pool_size: "${PG_POOL_SIZE:-20}" # Increased for production load

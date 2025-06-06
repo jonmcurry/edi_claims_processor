@@ -12,6 +12,7 @@ import yaml
 import os
 import uuid
 import threading
+import re # Added for environment variable expansion
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -144,6 +145,28 @@ def setup_logging():
                 config_data = yaml.safe_load(f.read())
             
             logging_config = config_data.get('logging', {})
+
+            # Helper to expand environment variables like ${VAR:-default}
+            def _expand_env_var(value: str) -> str:
+                if not isinstance(value, str):
+                    return value
+                # This regex finds ${VAR:-default} or ${VAR}
+                pattern = r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]+))?\}'
+                def replace_match(match):
+                    var_name, default_value = match.groups()
+                    # os.environ.get returns None if not found, which is fine
+                    return os.environ.get(var_name, default_value if default_value is not None else "")
+                return re.sub(pattern, replace_match, value)
+
+            # Process paths with environment variable expansion
+            log_dir = _expand_env_var(logging_config.get('log_dir', 'logs'))
+            app_log_filename = logging_config.get('app_log_file', 'app.log')
+            audit_log_filename = logging_config.get('audit_log_file', 'audit.log')
+            performance_log_filename = logging_config.get('performance_log_file', 'performance.log')
+            error_log_filename = logging_config.get('error_log_file', 'error.log')
+            
+            # Ensure log directory exists
+            os.makedirs(log_dir, exist_ok=True)
             
             # Determine if structured logging is enabled
             use_json_format = logging_config.get('structured', True)
@@ -201,7 +224,7 @@ def setup_logging():
                     'app_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'standard',
-                        'filename': logging_config.get('app_log_file', 'logs/app.log'),
+                        'filename': os.path.join(log_dir, app_log_filename),
                         'maxBytes': logging_config.get('max_bytes', 10485760),
                         'backupCount': logging_config.get('backup_count', 5),
                         'encoding': 'utf8',
@@ -211,7 +234,7 @@ def setup_logging():
                     'audit_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'audit',
-                        'filename': logging_config.get('audit_log_file', 'logs/audit.log'),
+                        'filename': os.path.join(log_dir, audit_log_filename),
                         'maxBytes': logging_config.get('max_bytes', 10485760),
                         'backupCount': logging_config.get('backup_count', 5),
                         'encoding': 'utf8',
@@ -221,7 +244,7 @@ def setup_logging():
                     'performance_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'performance',
-                        'filename': logging_config.get('performance_log_file', 'logs/performance.log'),
+                        'filename': os.path.join(log_dir, performance_log_filename),
                         'maxBytes': logging_config.get('max_bytes', 10485760),
                         'backupCount': logging_config.get('backup_count', 5),
                         'encoding': 'utf8',
@@ -231,7 +254,7 @@ def setup_logging():
                     'error_file_handler': {
                         'class': 'logging.handlers.RotatingFileHandler',
                         'formatter': 'standard',
-                        'filename': logging_config.get('error_log_file', 'logs/error.log'),
+                        'filename': os.path.join(log_dir, error_log_filename),
                         'maxBytes': logging_config.get('max_bytes', 10485760),
                         'backupCount': logging_config.get('backup_count', 10),
                         'encoding': 'utf8',
@@ -280,11 +303,6 @@ def setup_logging():
             # Add log aggregation handlers if configured
             if log_aggregation.get('enabled', False):
                 _add_aggregation_handlers(log_config, log_aggregation)
-            
-            # Ensure log directory exists
-            log_dir = logging_config.get('log_dir', 'logs')
-            if not os.path.exists(log_dir):
-                os.makedirs(log_dir, exist_ok=True)
             
             logging.config.dictConfig(log_config)
             logging.getLogger('app').info(

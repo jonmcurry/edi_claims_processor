@@ -205,6 +205,19 @@ class DistributedCacheInterface:
         
         return 0
 
+    def shutdown(self):
+        """Closes the connection to the distributed cache."""
+        if self.enabled and self.connection:
+            try:
+                if self.backend == 'redis':
+                    self.connection.close()
+                elif self.backend == 'memcached':
+                    self.connection.close()
+                logger.info(f"Distributed cache connection ({self.backend}) closed.")
+            except Exception as e:
+                logger.warning(f"Error closing distributed cache connection: {e}")
+
+
 # Initialize distributed cache
 distributed_cache = DistributedCacheInterface()
 
@@ -372,6 +385,7 @@ class RvuDatabaseCache:
     def __init__(self):
         self.cache_ttl = CONFIG.get('caching', {}).get('rvu_cache_ttl_seconds', 3600)
         logger.info(f"RvuDatabaseCache initialized with TTL: {self.cache_ttl} seconds.")
+        self.cache_type = CONFIG.get('caching', {}).get('rvu_cache_type', 'in_memory') # For health check metadata
 
     def get_rvu_details(self, cpt_code: str) -> Optional[Dict[str, Any]]:
         """
@@ -459,3 +473,10 @@ try:
 except Exception as e:
     logger.critical(f"Failed to initialize RvuDatabaseCache: {e}. RVU lookups will fail.", exc_info=True)
     rvu_cache_instance = None
+
+def shutdown_caches():
+    """Function to gracefully shut down all cache-related resources."""
+    logger.info("Shutting down cache systems...")
+    distributed_cache.shutdown()
+    enhanced_cache.clear()
+    logger.info("All cache systems have been shut down.")
