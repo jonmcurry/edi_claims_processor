@@ -10,9 +10,9 @@ import time
 import os
 import sys
 import multiprocessing
-import awaitable
+# import awaitable # REMOVED: Incorrect import
 import psutil # For system CPU and memory monitoring
-from typing import List, Any, Dict, Optional, Callable
+from typing import List, Any, Dict, Optional, Callable, Awaitable # MODIFIED: Added Awaitable
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -56,7 +56,7 @@ logger = get_logger('app.processing.batch_handler')
 class ProcessingStage(Enum):
     """Enumeration of processing pipeline stages."""
     FETCH = "FETCH"
-    VALIDATE = "VALIDATE" 
+    VALIDATE = "VALIDATE"
     ML_PREDICT = "ML_PREDICT"
     CALCULATE_REIMBURSEMENT = "CALCULATE_REIMBURSEMENT" # More descriptive
     EXPORT = "EXPORT"
@@ -109,7 +109,7 @@ class PipelineProcessingMetrics:
                  metrics.items_in_queue = queues[stage].qsize()
 
 
-@dataclass 
+@dataclass
 class ClaimWorkItem:
     """Work item representing a claim at various processing stages."""
     claim_id: str
@@ -120,7 +120,7 @@ class ClaimWorkItem:
     retries: int = 0
     max_retries: int = 3 # Configurable per stage if needed
     # To store results from previous stages
-    validation_result: Any = None 
+    validation_result: Any = None
     ml_prediction: Any = None
     reimbursement_details: Any = None
 
@@ -146,8 +146,8 @@ class OptimizedPipelineProcessor:
     and enhanced read-replica support for validation operations.
     """
     
-    def __init__(self, pg_session_factory: Callable[..., Session], 
-                 sql_session_factory: Callable[..., Session], 
+    def __init__(self, pg_session_factory: Callable[..., Session],
+                 sql_session_factory: Callable[..., Session],
                  config: Dict[str, Any]):
         """
         Initializes the pipeline processor.
@@ -225,7 +225,7 @@ class OptimizedPipelineProcessor:
             'io': min(cpu_count * 4, proc_config.get('max_io_workers', 32))
         }
         self.current_workers_per_stage_type: Dict[str, int] = {
-            'cpu': max(self.min_workers_per_stage_type['cpu'], 
+            'cpu': max(self.min_workers_per_stage_type['cpu'],
                        min(cpu_count, self.max_workers_per_stage_type['cpu'])),
             'io': max(self.min_workers_per_stage_type['io'],
                       min(cpu_count * 2, self.max_workers_per_stage_type['io']))
@@ -405,9 +405,9 @@ class OptimizedPipelineProcessor:
                 logger.error(f"[{stage_name}] Error: {e}", exc_info=True)
                 await asyncio.sleep(5.0) # Wait before retrying on error
 
-    def _generic_stage_worker_manager(self, input_stage_queue: asyncio.Queue, 
-                                 output_stage_queue: Optional[asyncio.Queue], 
-                                 processor_func: Callable[[ClaimWorkItem], awaitable[Optional[ClaimWorkItem]]], 
+    def _generic_stage_worker_manager(self, input_stage_queue: asyncio.Queue,
+                                 output_stage_queue: Optional[asyncio.Queue],
+                                 processor_func: Callable[[ClaimWorkItem], Awaitable[Optional[ClaimWorkItem]]], # MODIFIED HERE
                                  stage_name: str, worker_type: str):
         """Manages a pool of worker tasks for a generic pipeline stage."""
         async def manager():
@@ -471,9 +471,9 @@ class OptimizedPipelineProcessor:
 
         return manager # Return the coroutine function
 
-    async def _stage_worker_loop(self, input_queue: asyncio.Queue, 
-                                output_queue: Optional[asyncio.Queue], 
-                                processor_func: Callable[[ClaimWorkItem], awaitable[Optional[ClaimWorkItem]]], 
+    async def _stage_worker_loop(self, input_queue: asyncio.Queue,
+                                output_queue: Optional[asyncio.Queue],
+                                processor_func: Callable[[ClaimWorkItem], Awaitable[Optional[ClaimWorkItem]]], # MODIFIED HERE
                                 stage_name: str, worker_cid:str):
         """The actual processing loop for a single worker task of a stage."""
         set_correlation_id(worker_cid)
@@ -543,7 +543,7 @@ class OptimizedPipelineProcessor:
         validation_result = await loop.run_in_executor(
             self.io_executor, # Rules engine might do DB lookups
             self.rules_engine.validate_claim, # This method from rules_engine.py
-            claim_orm 
+            claim_orm
         )
         work_item.validation_result = validation_result # Store for later stages
 
@@ -553,8 +553,8 @@ class OptimizedPipelineProcessor:
             try:
                 with self.pg_session_factory(read_only=False) as write_pg_session:
                     update_staging_claim_status(
-                        write_pg_session, 
-                        claim_orm.claim_id, 
+                        write_pg_session,
+                        claim_orm.claim_id,
                         "VALIDATION_FAILED_RULES",
                         [f"{e['rule_id']}|{e['field']}|{e['message']}" for e in validation_result.errors]
                     )
@@ -568,7 +568,7 @@ class OptimizedPipelineProcessor:
         # from rules_engine.validate_claim IF that method modifies its input.
         # Current rules_engine.validate_claim does update claim_orm.processing_status
         # and other validation flags.
-        work_item.data = claim_orm 
+        work_item.data = claim_orm
         return work_item
 
     async def _process_item_ml_prediction(self, work_item: ClaimWorkItem) -> Optional[ClaimWorkItem]:
@@ -628,7 +628,7 @@ class OptimizedPipelineProcessor:
             # Extract data if needed or assume claim_obj is updated
             # Example: sum up line_item.estimated_reimbursement_amount
             total_est_reimb = sum(
-                getattr(li, 'estimated_reimbursement_amount', Decimal('0.00')) 
+                getattr(li, 'estimated_reimbursement_amount', Decimal('0.00'))
                 for li in getattr(claim_obj, 'cms1500_line_items', [])
             )
             return {"total_estimated_reimbursement": float(total_est_reimb)}
@@ -707,11 +707,11 @@ class OptimizedPipelineProcessor:
                 return False
         
         export_successful = await loop.run_in_executor(
-            self.io_executor, 
-            sync_export, 
-            claim_orm, 
-            work_item.validation_result, 
-            work_item.ml_prediction, 
+            self.io_executor,
+            sync_export,
+            claim_orm,
+            work_item.validation_result,
+            work_item.ml_prediction,
             work_item.reimbursement_details
         )
         
@@ -730,8 +730,8 @@ class OptimizedPipelineProcessor:
         try:
             with self.pg_session_factory(read_only=False) as pg_session:
                 update_staging_claim_status(
-                    pg_session, 
-                    work_item.claim_id, 
+                    pg_session,
+                    work_item.claim_id,
                     f"ERROR_PIPELINE_{work_item.current_stage.value}_MAX_RETRIES",
                     [f"Max retries exceeded in stage {work_item.current_stage.value}. Last error: {str(error)[:500]}"] # Truncate long errors
                 )
@@ -843,7 +843,7 @@ class OptimizedPipelineProcessor:
         logger.info("Stopping pipeline processor...")
         self.shutdown_event.set()
         # Give some time for tasks to acknowledge shutdown_event
-        await asyncio.sleep(1) 
+        await asyncio.sleep(1)
         
         # Cancel any remaining top-level pipeline tasks
         for task in self.active_pipeline_tasks:
@@ -862,8 +862,8 @@ class BatchProcessor:
     """
     Legacy BatchProcessor class that now uses OptimizedPipelineProcessor internally.
     """
-    def __init__(self, pg_session_factory: Callable[..., Session], 
-                 sql_session_factory: Callable[..., Session], 
+    def __init__(self, pg_session_factory: Callable[..., Session],
+                 sql_session_factory: Callable[..., Session],
                  config: Dict[str, Any]):
         logger.warning("Using legacy BatchProcessor wrapper. Consider updating calls to use OptimizedPipelineProcessor directly for async benefits.")
         self.pipeline_processor = OptimizedPipelineProcessor(pg_session_factory, sql_session_factory, config)
@@ -920,9 +920,9 @@ if __name__ == '__main__':
 
     from app.utils.logging_config import setup_logging
     from app.database.connection_manager import (
-        init_database_connections, 
-        get_postgres_session, 
-        get_sqlserver_session, 
+        init_database_connections,
+        get_postgres_session,
+        get_sqlserver_session,
         dispose_engines,
         CONFIG as APP_CONFIG_FROM_CM # Use the one loaded by connection_manager
     )
@@ -937,7 +937,7 @@ if __name__ == '__main__':
         logger.info("Starting OptimizedPipelineProcessor test...")
         try:
             # Initialize database connections (this also warms pools)
-            init_database_connections() 
+            init_database_connections()
             
             pg_factory = lambda read_only=False: get_postgres_session(read_only=read_only)
             sql_factory = lambda read_only=False: get_sqlserver_session(read_only=read_only) # SQL factory usually for write
@@ -973,15 +973,15 @@ if __name__ == '__main__':
             pipeline_run_task = asyncio.create_task(pipeline_processor.run_pipeline())
 
             # Let the pipeline run for a certain duration for testing purposes
-            test_duration_seconds = 45 
+            test_duration_seconds = 45
             logger.info(f"Pipeline will run for approximately {test_duration_seconds} seconds for this test...")
-            await asyncio.sleep(test_duration_seconds) 
+            await asyncio.sleep(test_duration_seconds)
             
             logger.info("Test duration elapsed. Signaling pipeline to stop...")
             await pipeline_processor.stop_pipeline() # Gracefully stop the pipeline
             
             # Wait for the main pipeline task to finish after stop signal
-            await pipeline_run_task 
+            await pipeline_run_task
 
             logger.info("--- Final Pipeline Metrics ---")
             final_metrics = pipeline_processor.metrics
@@ -1010,4 +1010,3 @@ if __name__ == '__main__':
             logger.info("Test run interrupted by user.")
         except Exception as e:
             logger.error(f"Unhandled exception in test runner: {e}", exc_info=True)
-
