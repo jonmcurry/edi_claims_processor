@@ -53,10 +53,8 @@ class PerformanceTimer:
         self.end_time = time.perf_counter()
         duration = self.end_time - self.start_time
         
-        # Record the timing
         self.monitor.record_timing(self.operation_name, duration, self.labels)
         
-        # Record success/failure
         if exc_type is None:
             self.monitor.record_counter(f"{self.operation_name}_success", 1, self.labels)
         else:
@@ -74,14 +72,12 @@ class PerformanceMonitor:
         self.config = config or {}
         self.monitoring_config = self.config.get('monitoring', {})
         
-        # Thread-safe storage for metrics
-        self._metrics_lock = threading.Lock()
-        self._timings = defaultdict(lambda: deque(maxlen=1000))  # Store last 1000 measurements
+        self._metrics_lock = threading.RLock()
+        self._timings = defaultdict(lambda: deque(maxlen=1000))
         self._counters = defaultdict(int)
         self._gauges = defaultdict(float)
-        self._throughput_data = defaultdict(lambda: deque(maxlen=100))  # Store last 100 throughput measurements
+        self._throughput_data = defaultdict(lambda: deque(maxlen=100))
         
-        # Performance tracking
         self._operation_stats = defaultdict(lambda: {
             'total_count': 0,
             'total_duration': 0.0,
@@ -90,12 +86,10 @@ class PerformanceMonitor:
             'error_count': 0
         })
         
-        # System monitoring
         self._system_monitor_enabled = self.monitoring_config.get('system_monitoring_enabled', True)
         self._system_monitor_interval = self.monitoring_config.get('system_monitor_interval_seconds', 60)
         self._system_monitor_thread = None
         
-        # Metrics collector integration
         self.metrics_collector = MetricsCollector()
         
         logger.info("PerformanceMonitor initialized")
@@ -111,28 +105,23 @@ class PerformanceMonitor:
         def monitor_system():
             while self._system_monitor_enabled:
                 try:
-                    # CPU metrics
                     cpu_percent = psutil.cpu_percent(interval=1)
                     self.record_gauge('system_cpu_percent', cpu_percent)
                     
-                    # Memory metrics
                     memory = psutil.virtual_memory()
                     self.record_gauge('system_memory_percent', memory.percent)
                     self.record_gauge('system_memory_available_gb', memory.available / (1024**3))
                     
-                    # Disk I/O metrics
                     disk_io = psutil.disk_io_counters()
                     if disk_io:
                         self.record_gauge('system_disk_read_bytes_per_sec', disk_io.read_bytes)
                         self.record_gauge('system_disk_write_bytes_per_sec', disk_io.write_bytes)
                     
-                    # Network I/O metrics
                     net_io = psutil.net_io_counters()
                     if net_io:
                         self.record_gauge('system_network_bytes_sent_per_sec', net_io.bytes_sent)
                         self.record_gauge('system_network_bytes_recv_per_sec', net_io.bytes_recv)
                     
-                    # Process-specific metrics
                     process = psutil.Process()
                     self.record_gauge('process_memory_mb', process.memory_info().rss / (1024**2))
                     self.record_gauge('process_cpu_percent', process.cpu_percent())
@@ -167,7 +156,6 @@ class PerformanceMonitor:
         labels = labels or {}
         
         with self._metrics_lock:
-            # Store raw timing data
             timing_data = {
                 'duration': duration_seconds,
                 'timestamp': datetime.utcnow(),
@@ -175,14 +163,12 @@ class PerformanceMonitor:
             }
             self._timings[operation_name].append(timing_data)
             
-            # Update operation statistics
             stats = self._operation_stats[operation_name]
             stats['total_count'] += 1
             stats['total_duration'] += duration_seconds
             stats['min_duration'] = min(stats['min_duration'], duration_seconds)
             stats['max_duration'] = max(stats['max_duration'], duration_seconds)
         
-        # Send to metrics collector
         self.metrics_collector.record_timing(operation_name, duration_seconds, labels)
         
         logger.debug(f"Recorded timing: {operation_name} = {duration_seconds:.4f}s")
@@ -194,13 +180,11 @@ class PerformanceMonitor:
         with self._metrics_lock:
             self._counters[counter_name] += value
             
-            # Track errors separately
             if 'error' in counter_name:
                 operation = counter_name.replace('_error', '').replace('_success', '')
                 if operation in self._operation_stats:
                     self._operation_stats[operation]['error_count'] += value
         
-        # Send to metrics collector
         self.metrics_collector.record_counter(counter_name, value, labels)
         
         logger.debug(f"Recorded counter: {counter_name} += {value}")
@@ -212,7 +196,6 @@ class PerformanceMonitor:
         with self._metrics_lock:
             self._gauges[gauge_name] = value
         
-        # Send to metrics collector
         self.metrics_collector.record_gauge(gauge_name, value, labels)
         
         logger.debug(f"Recorded gauge: {gauge_name} = {value}")
@@ -230,4 +213,65 @@ class PerformanceMonitor:
         )
         
         with self._metrics_lock:
-            self._throughput_data
+            self._throughput_data[operation].append(throughput_metric)
+
+    def get_operation_statistics(self, operation_name: Optional[str] = None) -> Dict[str, Any]:
+        """Get statistics for a specific operation or all operations."""
+        with self._metrics_lock:
+            if operation_name:
+                return self._operation_stats.get(operation_name, {})
+            return dict(self._operation_stats)
+
+    def get_system_metrics(self) -> Dict[str, float]:
+        """Get latest system metrics."""
+        with self._metrics_lock:
+            return {
+                'system_cpu_percent': self._gauges.get('system_cpu_percent', 0.0),
+                'system_memory_percent': self._gauges.get('system_memory_percent', 0.0),
+                'process_memory_mb': self._gauges.get('process_memory_mb', 0.0)
+            }
+            
+    def get_throughput_metrics(self, operation: Optional[str] = None, window_seconds: int = 60) -> Dict[str, Any]:
+        """Calculate throughput for specific operations."""
+        throughput_report = {}
+        with self._metrics_lock:
+            operations_to_check = [operation] if operation else list(self._throughput_data.keys())
+            
+            for op_name in operations_to_check:
+                recent_data = [
+                    d for d in self._throughput_data[op_name]
+                    if d.timestamp > datetime.utcnow() - timedelta(seconds=window_seconds)
+                ]
+                
+                if not recent_data:
+                    throughput_report[op_name] = {'count': 0, 'duration': 0, 'avg_rate': 0.0}
+                    continue
+                
+                total_count = sum(d.count for d in recent_data)
+                total_duration = sum(d.duration_seconds for d in recent_data)
+                avg_rate = total_count / total_duration if total_duration > 0 else 0
+                
+                throughput_report[op_name] = {
+                    'count': total_count,
+                    'duration': total_duration,
+                    'avg_rate': avg_rate
+                }
+        return throughput_report
+    
+    def generate_performance_report(self) -> Dict[str, Any]:
+        """Generate a comprehensive performance report dictionary."""
+        operations_stats = self.get_operation_statistics()
+        for op_name, stats in operations_stats.items():
+            if stats['total_count'] > 0:
+                stats['error_rate'] = stats['error_count'] / stats['total_count']
+                stats['avg_duration_ms'] = (stats['total_duration'] / stats['total_count']) * 1000
+            else:
+                stats['error_rate'] = 0.0
+                stats['avg_duration_ms'] = 0.0
+
+        return {
+            "operations": operations_stats,
+            "system_metrics": self.get_system_metrics(),
+            "throughput": self.get_throughput_metrics(),
+            "timestamp": datetime.utcnow().isoformat()
+        }

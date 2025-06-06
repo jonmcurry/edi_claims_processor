@@ -70,24 +70,20 @@ class AlertManager:
         self.health_checker = health_checker
         self.performance_monitor = performance_monitor
         
-        # Alert storage
         self._alerts_lock = threading.Lock()
         self._active_alerts: Dict[str, Alert] = {}
         self._alert_history: List[Alert] = []
         self._alert_rules: List[AlertRule] = []
         self._last_alert_time: Dict[str, datetime] = {}
         
-        # Notification settings
         self.notifications_enabled = self.alert_config.get('notifications_enabled', True)
         self.email_config = self.alert_config.get('email', {})
         self.webhook_config = self.alert_config.get('webhook', {})
         
-        # Monitoring thread
         self._monitoring_enabled = True
         self._monitoring_interval = self.alert_config.get('check_interval_seconds', 60)
         self._monitoring_thread = None
         
-        # Initialize default alert rules
         self._setup_default_alert_rules()
         
         logger.info("AlertManager initialized")
@@ -98,7 +94,6 @@ class AlertManager:
     def _setup_default_alert_rules(self):
         """Setup default alert rules for common conditions."""
         
-        # Database health alerts
         self.add_alert_rule(AlertRule(
             name="database_unhealthy",
             condition=lambda health_report: any(
@@ -111,11 +106,10 @@ class AlertManager:
             cooldown_minutes=10
         ))
         
-        # High error rate alert
         self.add_alert_rule(AlertRule(
             name="high_error_rate",
             condition=lambda perf_report: any(
-                stats.get('error_rate', 0) > 0.1  # > 10% error rate
+                stats.get('error_rate', 0) > 0.1
                 for stats in perf_report.get('operations', {}).values()
             ),
             severity=AlertSeverity.WARNING,
@@ -124,11 +118,10 @@ class AlertManager:
             cooldown_minutes=15
         ))
         
-        # Low throughput alert
         self.add_alert_rule(AlertRule(
             name="low_throughput",
             condition=lambda perf_report: any(
-                stats.get('avg_rate', 0) < 10  # < 10 claims/second
+                stats.get('avg_rate', 0) < 10
                 for op, stats in perf_report.get('throughput', {}).items()
                 if 'claim' in op.lower()
             ),
@@ -138,7 +131,6 @@ class AlertManager:
             cooldown_minutes=20
         ))
         
-        # High system resource usage
         self.add_alert_rule(AlertRule(
             name="high_cpu_usage",
             condition=lambda perf_report: perf_report.get('system_metrics', {}).get('system_cpu_percent', 0) > 90,
@@ -157,7 +149,6 @@ class AlertManager:
             cooldown_minutes=5
         ))
         
-        # Failed claims accumulation
         self.add_alert_rule(AlertRule(
             name="failed_claims_accumulating",
             condition=lambda health_report: any(
@@ -239,19 +230,16 @@ class AlertManager:
             return
         
         try:
-            # Get current system state
             health_report = self.health_checker.run_comprehensive_health_check()
             perf_report = self.performance_monitor.generate_performance_report()
             
             current_time = datetime.utcnow()
             
             for rule in self._alert_rules:
-                # Check cooldown period
                 last_alert = self._last_alert_time.get(rule.name)
                 if last_alert and current_time - last_alert < timedelta(minutes=rule.cooldown_minutes):
                     continue
                 
-                # Check if condition is met
                 try:
                     context_data = {}
                     condition_met = False
@@ -298,7 +286,6 @@ class AlertManager:
                         if self.notifications_enabled:
                             self.send_notification(alert)
                     
-                    # Auto-resolve existing alerts if condition no longer met
                     elif rule.auto_resolve:
                         alerts_to_resolve = [alert_id for alert_id, alert in self._active_alerts.items() 
                                            if alert.name == rule.name]
@@ -317,11 +304,9 @@ class AlertManager:
             return
         
         try:
-            # Send email notification
             if self.email_config.get('enabled', False):
                 self._send_email_notification(alert)
             
-            # Send webhook notification  
             if self.webhook_config.get('enabled', False):
                 self._send_webhook_notification(alert)
             
@@ -403,13 +388,7 @@ This is an automated alert from the EDI Claims Processor monitoring system.
         }
         
         try:
-            # Would use requests or httpx in real implementation
-            # import requests
-            # response = requests.post(webhook_url, json=payload, timeout=10)
-            # response.raise_for_status()
-            
             logger.info(f"Webhook notification would be sent to {webhook_url} for alert: {alert.name}")
-            # Remove this line when implementing actual webhook calls
             
         except Exception as e:
             logger.error(f"Failed to send webhook notification: {e}")
@@ -488,14 +467,12 @@ This is an automated alert from the EDI Claims Processor monitoring system.
                 'resolution_times': []
             }
             
-            # Component breakdown
             for alert in recent_alerts:
                 component = alert.component
                 if component not in stats['by_component']:
                     stats['by_component'][component] = 0
                 stats['by_component'][component] += 1
             
-            # Resolution times for resolved alerts
             for alert in recent_alerts:
                 if alert.status == AlertStatus.RESOLVED and alert.resolved_at:
                     resolution_time = (alert.resolved_at - alert.created_at).total_seconds()
@@ -555,13 +532,12 @@ if __name__ == '__main__':
     setup_logging()
     set_correlation_id("ALERT_MANAGER_TEST")
     
-    # Test configuration
     test_config = {
         'alerting': {
             'notifications_enabled': True,
             'check_interval_seconds': 5,
             'email': {
-                'enabled': False,  # Set to True and configure for real email testing
+                'enabled': False,
                 'smtp_server': 'smtp.gmail.com',
                 'smtp_port': 587,
                 'username': 'your_email@gmail.com',
@@ -570,14 +546,14 @@ if __name__ == '__main__':
                 'to_emails': ['admin@yourcompany.com']
             },
             'webhook': {
-                'enabled': False,  # Set to True and configure for real webhook testing
+                'enabled': False,
                 'url': 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
             }
         },
         'monitoring': {
             'db_timeout_threshold_ms': 1000,
-            'memory_threshold_percent': 50,  # Lower threshold for testing
-            'cpu_threshold_percent': 50,     # Lower threshold for testing
+            'memory_threshold_percent': 50,
+            'cpu_threshold_percent': 50,
             'system_monitoring_enabled': True,
             'system_monitor_interval_seconds': 2
         }
@@ -586,20 +562,16 @@ if __name__ == '__main__':
     try:
         init_database_connections()
         
-        # Create health checker and performance monitor
         health_checker = HealthChecker(test_config)
         performance_monitor = PerformanceMonitor(test_config)
         
-        # Create alert manager
         alert_manager = AlertManager(test_config, health_checker, performance_monitor)
         
         print("Alert Manager Test Started")
         print("Monitoring for alerts...")
         
-        # Let it run for a bit to collect metrics and potentially trigger alerts
         time.sleep(20)
         
-        # Generate some test data to potentially trigger alerts
         print("\nSimulating high error rate...")
         for i in range(10):
             performance_monitor.record_counter("test_operation_error", 1)
@@ -607,7 +579,6 @@ if __name__ == '__main__':
         
         time.sleep(10)
         
-        # Generate alert report
         report = alert_manager.generate_alert_report()
         
         print("\n=== ALERT REPORT ===")
@@ -643,11 +614,10 @@ if __name__ == '__main__':
         for rule in report['alert_rules']:
             print(f"- {rule['name']} ({rule['severity']}) - {rule['component']}")
         
-        # Test manual alert creation
         print("\n--- Testing Manual Alert ---")
         test_rule = AlertRule(
             name="test_manual_alert",
-            condition=lambda x: True,  # Always trigger
+            condition=lambda x: True,
             severity=AlertSeverity.INFO,
             component="test",
             message_template="This is a test alert: {test_data}",
@@ -657,12 +627,10 @@ if __name__ == '__main__':
         test_alert = alert_manager.create_alert(test_rule, {"test_data": "Hello World"})
         print(f"Created test alert: {test_alert.id}")
         
-        # Test alert resolution
         time.sleep(2)
         alert_manager.resolve_alert(test_alert.id)
         print(f"Resolved test alert: {test_alert.id}")
         
-        # Stop monitoring
         alert_manager.stop_monitoring()
         performance_monitor.stop_system_monitoring()
         
