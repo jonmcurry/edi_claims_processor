@@ -2,6 +2,7 @@
 # python -m venv venv
 #
 # Activate the virtual environment
+# powershell: Set-ExecutionPolicy RemoteSigned
 # .\venv\Scripts\activate
 #
 # Run code:
