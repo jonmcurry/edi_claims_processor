@@ -320,6 +320,84 @@ def run_postgres_schema_with_psql(sql_path):
         print("Error: psql command not found. Ensure PostgreSQL client tools are installed and in PATH.")
         raise
 
+def insert_facility_framework_postgres(facility_details_list, organization_codes, region_codes, financial_class_codes_master, payer_codes_master, department_ids_master):
+    """Populates the facility framework tables in the PostgreSQL database."""
+    print("Populating facility framework tables in PostgreSQL...")
+    conn = None
+    try:
+        conn = psycopg2.connect(**POSTGRES_CONN)
+        cur = conn.cursor()
+
+        # Insert Organizations
+        org_data = [(f"Organization {code}", code) for code in organization_codes]
+        cur.executemany("INSERT INTO edi.organizations (organization_name, organization_code) VALUES (%s, %s) ON CONFLICT (organization_code) DO NOTHING", org_data)
+
+        # Insert Regions
+        reg_data = [(f"Region {code}", code) for code in region_codes]
+        cur.executemany("INSERT INTO edi.regions (region_name, region_code) VALUES (%s, %s) ON CONFLICT (region_code) DO NOTHING", reg_data)
+
+        # Insert Standard Payers
+        payer_data = [(code, f"Payer {code}", "Commercial") for code in payer_codes_master]
+        cur.executemany("INSERT INTO edi.standard_payers (standard_payer_code, standard_payer_name, payer_category) VALUES (%s, %s, %s) ON CONFLICT (standard_payer_code) DO NOTHING", payer_data)
+
+        conn.commit()
+        print("Inserted Organizations, Regions, and Standard Payers into PostgreSQL.")
+
+        # Get generated IDs
+        cur.execute("SELECT organization_code, organization_id FROM edi.organizations")
+        org_id_map = dict(cur.fetchall())
+        cur.execute("SELECT region_code, region_id FROM edi.regions")
+        reg_id_map = dict(cur.fetchall())
+        cur.execute("SELECT standard_payer_code, standard_payer_id FROM edi.standard_payers")
+        payer_id_map = dict(cur.fetchall())
+
+        # Insert Facilities, Financial Classes, and Departments
+        for fac_detail in facility_details_list:
+            org_db_id = org_id_map.get(fac_detail["organization_code"])
+            reg_db_id = reg_id_map.get(fac_detail["region_code"])
+            payer_db_id = payer_id_map.get(fac_detail["payer_code"])
+
+            # Insert Facility
+            facility_id_val = fac_detail["facility_id"]
+            cur.execute(
+                """
+                INSERT INTO edi.facilities (facility_id, facility_name, facility_code, organization_id, region_id, city, state_code, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (facility_id) DO NOTHING
+                """,
+                (facility_id_val, f"Facility {facility_id_val}", facility_id_val, org_db_id, reg_db_id, "Gen City", "XX", True)
+            )
+
+            # Insert Financial Class
+            fc_id_val = fac_detail["financial_class_code"]
+            cur.execute(
+                """
+                INSERT INTO edi.financial_classes (financial_class_id, financial_class_description, standard_payer_id, facility_id, active)
+                VALUES (%s, %s, %s, %s, %s) ON CONFLICT (financial_class_id) DO NOTHING
+                """,
+                (fc_id_val, f"Financial Class {fc_id_val}", payer_db_id, facility_id_val, True)
+            )
+
+            # Insert Clinical Department
+            dept_code_val = fac_detail["department_code"]
+            cur.execute(
+                """
+                INSERT INTO edi.clinical_departments (clinical_department_code, department_description, facility_id, active)
+                VALUES (%s, %s, %s, %s) ON CONFLICT (clinical_department_code, facility_id) DO NOTHING
+                """,
+                (dept_code_val, f"Department {dept_code_val}", facility_id_val, True)
+            )
+        
+        conn.commit()
+        print("Finished PostgreSQL facility framework population.")
+
+    except psycopg2.Error as e:
+        print(f"Error inserting facility framework into PostgreSQL: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
 def insert_facility_framework_sqlserver(facility_details_list, organization_codes, region_codes, financial_class_codes_master, payer_codes_master, department_codes_master):
     print("Populating facility framework tables in SQL Server...")
     conn = None
@@ -710,8 +788,10 @@ def main():
         org_codes, reg_codes, fac_ids_list, fc_codes_list_master, p_codes_list_master, dept_ids_master, fac_details = \
             generate_facility_framework_data(n_orgs=3, n_regions=2, n_facilities=10, n_financial_classes=5, n_payers=5, n_departments=5)
 
-        print("\n--- Step 5: Populating SQL Server Facility Framework ---")
+        print("\n--- Step 5: Populating Facility Framework in BOTH Databases ---")
         insert_facility_framework_sqlserver(fac_details, org_codes, reg_codes, fc_codes_list_master, p_codes_list_master, dept_ids_master)
+        insert_facility_framework_postgres(fac_details, org_codes, reg_codes, fc_codes_list_master, p_codes_list_master, dept_ids_master)
+
 
         print("\n--- Step 6: Generating and Inserting Claims into PostgreSQL Staging ---")
         claims_for_pg = generate_random_claims(fac_ids_list, fc_codes_list_master, dept_ids_master, n_claims=100000) # Changed to 100,000

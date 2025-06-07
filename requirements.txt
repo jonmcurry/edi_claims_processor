@@ -87,6 +87,7 @@ networkx>=3.2.1
 graphviz>=0.20.1
 pyDatalog>=0.17.1
 psutil>=5.9.0
+concurrent-log-handler>=0.9.1
 
 # --- Development and Testing Dependencies ---
 # To install, run: pip install -r requirements.txt -r requirements-dev.txt

@@ -2,7 +2,8 @@
 """
 Enhanced configuration for application-wide logging with structured logging,
 distributed tracing, log aggregation, and performance monitoring.
-Reads settings from config.yaml.
+Reads settings from config.yaml and uses concurrent-log-handler for robust
+multi-process file rotation on Windows.
 """
 import logging
 import logging.config
@@ -17,6 +18,16 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pythonjsonlogger import jsonlogger
+
+# Try to import the concurrent_log_handler. If not available, log a warning
+# and the configuration will fall back to the standard handler.
+try:
+    from concurrent_log_handler import ConcurrentRotatingFileHandler
+    CONCURRENT_LOG_HANDLER_AVAILABLE = True
+except ImportError:
+    CONCURRENT_LOG_HANDLER_AVAILABLE = False
+    # Use standard handler as a fallback
+    from logging.handlers import RotatingFileHandler
 
 # Context variables for correlation and tracing
 correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
@@ -181,6 +192,17 @@ def setup_logging():
             # Ensure log directory exists
             os.makedirs(log_dir, exist_ok=True)
             
+            # Determine which file handler to use
+            if CONCURRENT_LOG_HANDLER_AVAILABLE:
+                file_handler_class = 'concurrent_log_handler.ConcurrentRotatingFileHandler'
+                # FIX: Removed 'use_builtin_handlers' as it's not a valid argument
+                handler_options = {'delay': True} 
+                logging.info("Using ConcurrentRotatingFileHandler for log rotation.")
+            else:
+                file_handler_class = 'logging.handlers.RotatingFileHandler'
+                handler_options = {'delay': True}
+                logging.warning("concurrent-log-handler not found. Falling back to standard RotatingFileHandler. This may cause issues on Windows in multi-process environments.")
+
             # Determine if structured logging is enabled
             use_json_format = logging_config.get('structured', True)
             log_aggregation = logging_config.get('aggregation', {})
@@ -244,7 +266,7 @@ def setup_logging():
                         'stream': 'ext://sys.stdout',
                     },
                     'app_file_handler': {
-                        'class': 'logging.handlers.RotatingFileHandler',
+                        'class': file_handler_class,
                         'formatter': 'standard',
                         'filename': os.path.join(log_dir, app_log_filename),
                         'maxBytes': max_bytes,
@@ -252,9 +274,10 @@ def setup_logging():
                         'encoding': 'utf8',
                         'level': level_app,
                         'filters': ['correlation_id', 'performance'],
+                        **handler_options
                     },
                     'audit_file_handler': {
-                        'class': 'logging.handlers.RotatingFileHandler',
+                        'class': file_handler_class,
                         'formatter': 'audit',
                         'filename': os.path.join(log_dir, audit_log_filename),
                         'maxBytes': audit_max_bytes,
@@ -262,9 +285,10 @@ def setup_logging():
                         'encoding': 'utf8',
                         'level': level_audit,
                         'filters': ['correlation_id'],
+                        **handler_options
                     },
                     'performance_file_handler': {
-                        'class': 'logging.handlers.RotatingFileHandler',
+                        'class': file_handler_class,
                         'formatter': 'performance',
                         'filename': os.path.join(log_dir, performance_log_filename),
                         'maxBytes': max_bytes,
@@ -272,9 +296,10 @@ def setup_logging():
                         'encoding': 'utf8',
                         'level': level_performance,
                         'filters': ['correlation_id', 'performance'],
+                        **handler_options
                     },
                     'error_file_handler': {
-                        'class': 'logging.handlers.RotatingFileHandler',
+                        'class': file_handler_class,
                         'formatter': 'standard',
                         'filename': os.path.join(log_dir, error_log_filename),
                         'maxBytes': max_bytes,
@@ -282,6 +307,7 @@ def setup_logging():
                         'encoding': 'utf8',
                         'level': 'ERROR',
                         'filters': ['correlation_id'],
+                        **handler_options
                     }
                 },
                 'loggers': {

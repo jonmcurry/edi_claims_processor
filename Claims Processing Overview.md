@@ -4,7 +4,7 @@ This project builds a high-performance claims processing system with an integrat
     Applies a rules engine and ML-based filter prediction to assign filter numbers.
     Stores processing metrics in a PostgreSQL metrics database.
     Transfers validated claims to a SQL Server production database with facility management.
-    Achieves a processing throughput of at least 100,000 records in 15 seconds (~6,667 records/second).
+    Achieves a processing throughput of at least 100,000 records in 15 seconds (~6,667 records/second) through the rules engine, data validation, and inserting into the claims table in SQL.
     Incorporates caching, asynchronous processing, connection pooling, bulk batch processing, and ML model optimization for performance, speed, and production-readiness.
     Targets 100% accuracy in filter prediction where feasible, with fallback to rule-based validation.
     Leverages config.yaml for configuration
