@@ -5,6 +5,10 @@
 # powershell: Set-ExecutionPolicy RemoteSigned
 # .\venv\Scripts\activate
 #
+# Remember to add the PostgreSQL bin folder to your PATH environment variable if it's not already included.
+# For example, if PostgreSQL is installed in C:\Program Files\PostgreSQL\15, add C:\Program Files\PostgreSQL\15\bin to your PATH.
+# Restart your terminal or command prompt after modifying the PATH variable.
+
 # Run code:
 # pip install uv
 # python -m uv pip install -r .\requirements.txt
