@@ -1,12 +1,11 @@
 # app/processing/rules_engine.py
 """
 Implements business logic for claim validation using a combination of direct Python checks
-and Datalog rules fetched from the 'edi.filters' table.
+and a pre-compiled Datalog ruleset for high performance.
 """
+from __future__ import annotations
 import time
-from datetime import date
-from decimal import Decimal
-from typing import List, Dict, Any, Set, Optional
+from typing import List, Dict, Any, Optional
 import threading
 
 from sqlalchemy.orm import Session
@@ -15,12 +14,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from pyDatalog import pyDatalog, Logic
 
 from app.utils.logging_config import get_logger, get_correlation_id
-from app.utils.error_handler import ValidationError as AppValidationError, StagingDBError
+from app.utils.error_handler import StagingDBError
 from app.database.models.postgres_models import (
     StagingClaim,
     Filter as EDIFilter,
     Facility as EDIFacility,
-    FinancialClass as EDIFinancialClass
 )
 from app.database.postgres_handler import perform_direct_staging_claim_validations
 
@@ -84,61 +82,78 @@ class ClaimValidationResult:
                 self.add_error(rule_id=rule, field=field, message=msg, source="PYTHON")
 
 class RulesEngine:
-    """Validates claims using Python checks and Datalog rules."""
-    _datalog_rules_loaded_main_thread: bool = False
-    _loaded_datalog_definitions: List[str] = []
+    """
+    Validates claims using Python checks and a pre-compiled Datalog ruleset
+    for high performance.
+    """
+    _datalog_logic_instance = None
     _engine_init_lock = threading.Lock()
 
     def __init__(self, pg_session: Session):
+        """
+        Initializes the RulesEngine.
+        It loads and compiles Datalog rules once and stores them in a class-level variable
+        to avoid reloading for every instance, which is critical for performance.
+        """
         with RulesEngine._engine_init_lock:
-            if not RulesEngine._datalog_rules_loaded_main_thread:
-                self._load_and_store_datalog_rules(pg_session)
-                RulesEngine._datalog_rules_loaded_main_thread = True
+            if RulesEngine._datalog_logic_instance is None:
+                self._load_and_compile_datalog_rules(pg_session)
     
-    def _load_and_store_datalog_rules(self, pg_session: Session):
-        """Loads Datalog rules from DB and stores definitions globally."""
+    def _load_and_compile_datalog_rules(self, pg_session: Session):
+        """
+        Loads Datalog rules from the DB and compiles them into a reusable Logic object.
+        This is a one-time operation.
+        """
         cid = get_correlation_id()
-        logger.info(f"[{cid}] Loading and storing Datalog rule definitions from database.")
+        logger.info(f"[{cid}] First-time initialization: Loading and compiling Datalog rules...")
         try:
             active_rules_orm: List[EDIFilter] = pg_session.query(EDIFilter).filter(
                 EDIFilter.rule_type == 'DATALOG', EDIFilter.is_active == True, EDIFilter.is_latest_version == True
             ).all()
 
             if not active_rules_orm:
-                logger.warning(f"[{cid}] No active Datalog rules found in edi.filters table.")
+                logger.warning(f"[{cid}] No active Datalog rules found in edi.filters table. Datalog validation will be skipped.")
+                RulesEngine._datalog_logic_instance = Logic() # Create an empty logic instance
                 return
 
-            RulesEngine._loaded_datalog_definitions = []
+            logic = Logic()
+            loaded_definitions = 0
             for rule_orm_obj in active_rules_orm:
-                datalog_statements = [
-                    line.strip() for line in rule_orm_obj.rule_definition.splitlines() 
-                    if line.strip() and not line.strip().startswith('%')
-                ]
-                RulesEngine._loaded_datalog_definitions.extend(datalog_statements)
+                # *** CORRECTED LINE ***
+                # Call load on the pyDatalog module, passing the logic instance as the target.
+                pyDatalog.load(rule_orm_obj.rule_definition, logic=logic)
+                loaded_definitions += 1
             
-            logger.info(f"[{cid}] Stored {len(RulesEngine._loaded_datalog_definitions)} Datalog rule statements to be used by worker threads.")
+            RulesEngine._datalog_logic_instance = logic
+            logger.info(f"[{cid}] Successfully compiled {loaded_definitions} Datalog rule definitions into a reusable logic instance.")
 
         except SQLAlchemyError as e_db:
             logger.error(f"[{cid}] Database error loading Datalog rules: {e_db}", exc_info=True)
             raise StagingDBError(f"Failed to load Datalog rules from DB: {e_db}", original_exception=e_db)
 
-    def _assert_claim_facts(self, claim: StagingClaim, pg_read_session: Session):
-        """Asserts facts about a claim into the Datalog engine for the current thread."""
+    def _assert_claim_facts(self, claim: StagingClaim, pg_read_session: Session, temp_logic):
+        """
+        Asserts facts about a single claim into a temporary, thread-safe Datalog logic instance.
+        """
         claim_id_str = str(claim.claim_id)
         
-        pyDatalog.assert_fact('claim', claim_id_str)
-        if claim.facility_id: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'facility_id', str(claim.facility_id))
-        if claim.financial_class_id: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'financial_class_id', str(claim.financial_class_id))
-        if claim.total_charge_amount is not None: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'total_charge_amount', float(claim.total_charge_amount))
+        # Assert claim facts into the temporary logic instance
+        temp_logic.assert_fact('claim', claim_id_str)
+        if claim.facility_id: temp_logic.assert_fact('claim_attribute', claim_id_str, 'facility_id', str(claim.facility_id))
+        if claim.financial_class_id: temp_logic.assert_fact('claim_attribute', claim_id_str, 'financial_class_id', str(claim.financial_class_id))
+        if claim.total_charge_amount is not None: temp_logic.assert_fact('claim_attribute', claim_id_str, 'total_charge_amount', float(claim.total_charge_amount))
         
+        # Assert master data facts from DB
         if claim.facility_id:
             facility_master = pg_read_session.query(EDIFacility.active).filter(EDIFacility.facility_id == claim.facility_id).first()
             if facility_master:
-                pyDatalog.assert_fact('master_facility_exists', str(claim.facility_id))
-                if facility_master.active: pyDatalog.assert_fact('master_facility_active', str(claim.facility_id))
+                temp_logic.assert_fact('master_facility_exists', str(claim.facility_id))
+                if facility_master.active: temp_logic.assert_fact('master_facility_active', str(claim.facility_id))
 
     def validate_claim(self, pg_validation_session: Session, claim_orm: StagingClaim) -> ClaimValidationResult:
-        """Validates a single claim using both Python checks and Datalog rules."""
+        """
+        Validates a single claim using Python checks and the pre-compiled Datalog ruleset.
+        """
         cid = get_correlation_id()
         claim_id_str = str(claim_orm.claim_id)
         logger.info(f"[{cid}] Starting comprehensive validation for Claim ID: {claim_id_str}")
@@ -156,45 +171,30 @@ class RulesEngine:
             logger.error(f"[{cid}] Unhandled error in Python validation phase for {claim_id_str}: {e}", exc_info=True)
             validation_result.add_error("PYTHON_VALIDATION_ERR", "System", str(e), "PYTHON")
         
-        # --- Datalog-based validation in a clean context ---
-        try:
-            # 1. Start with a clean slate for this specific validation run
-            pyDatalog.clear()
-            
-            # 2. Define all necessary terms and variables for this context
-            pyDatalog.create_terms('claim, claim_attribute, master_facility_exists, master_facility_active, validation_error, R, F, M')
+        # --- Datalog-based validation ---
+        if RulesEngine._datalog_logic_instance is None:
+            logger.error(f"[{cid}] Datalog logic instance not available. Skipping Datalog validation.")
+            validation_result.is_valid_datalog = True # Assume valid if engine fails
+        else:
+            try:
+                # Use a temporary logic instance derived from the main one to ensure thread safety.
+                # This inherits all the compiled rules but keeps facts isolated.
+                with RulesEngine._datalog_logic_instance.new_logic() as temp_logic:
+                    # Assert facts for the current claim into the temporary logic instance.
+                    self._assert_claim_facts(claim_orm, pg_validation_session, temp_logic)
+                    
+                    # Query for validation errors using the temporary logic.
+                    datalog_errors = temp_logic.ask(f'validation_error("{claim_id_str}", R, F, M)')
+                    
+                    if datalog_errors and hasattr(datalog_errors, 'data'):
+                        for rule_id, field, message in datalog_errors.data:
+                            validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
+                    else:
+                        validation_result.is_valid_datalog = True
 
-            # 3. Load all globally defined rules into this clean context
-            if RulesEngine._loaded_datalog_definitions:
-                for rule_def in RulesEngine._loaded_datalog_definitions:
-                    pyDatalog.load(rule_def)
-            else:
-                logger.warning(f"[{cid}] No Datalog rules loaded, skipping Datalog validation for claim {claim_id_str}.")
-                # If no rules, Datalog part is trivially valid
-                validation_result.is_valid_datalog = True
-            
-            # Only proceed if there are rules to check
-            if RulesEngine._loaded_datalog_definitions:
-                # 4. Assert facts for the current claim
-                self._assert_claim_facts(claim_orm, pg_validation_session)
-                
-                # 5. Query for validation errors
-                datalog_errors = pyDatalog.ask(f'validation_error("{claim_id_str}", R, F, M)')
-                
-                # FINAL, most robust check. Only iterate if the '.data' attribute exists.
-                if hasattr(datalog_errors, 'data'):
-                    # .data contains the list of result tuples. It could be empty, which is fine.
-                    for rule_id, field, message in datalog_errors.data:
-                        validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
-                else:
-                    # If there's no .data attribute, or the datalog_errors object is falsy (None or empty),
-                    # we can safely assume there are no errors to process. This avoids all previous errors.
-                    logger.debug(f"Datalog query returned no actionable validation errors for claim {claim_id_str}.")
-
-
-        except Exception as e_datalog:
-            logger.error(f"[{cid}] Error during Datalog rule execution for claim {claim_id_str}: {e_datalog}", exc_info=True)
-            validation_result.add_error("DATALOG_ENGINE_ERROR", "DatalogExecution", f"Datalog engine error: {e_datalog}", "SYSTEM")
+            except Exception as e_datalog:
+                logger.error(f"[{cid}] Error during Datalog rule execution for claim {claim_id_str}: {e_datalog}", exc_info=True)
+                validation_result.add_error("DATALOG_ENGINE_ERROR", "DatalogExecution", f"Datalog engine error: {e_datalog}", "SYSTEM")
         
         # --- Finalize Status ---
         if validation_result.is_overall_valid:
