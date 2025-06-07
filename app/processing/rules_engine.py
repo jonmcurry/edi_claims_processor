@@ -179,12 +179,20 @@ class RulesEngine:
                 self._assert_claim_facts(claim_orm, pg_validation_session)
                 
                 # 5. Query for validation errors
-                # The variables R, F, M are now available because of create_terms
                 datalog_errors = pyDatalog.ask(f'validation_error("{claim_id_str}", R, F, M)')
                 
-                if datalog_errors:
-                    for rule_id, field, message in datalog_errors:
+                if datalog_errors and hasattr(datalog_errors, 'data'):
+                    # The 'datalog_errors' object is an Answer. Iterate over its 'data' attribute.
+                    for rule_id, field, message in datalog_errors.data:
                         validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
+                elif datalog_errors: # Fallback for older versions or different structures
+                     logger.warning(f"Datalog result for claim {claim_id_str} is not in the expected format (missing .data). Attempting direct iteration.")
+                     try:
+                         for rule_id, field, message in datalog_errors:
+                            validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
+                     except TypeError:
+                         logger.error(f"Could not iterate over Datalog result for {claim_id_str} either directly or via .data.")
+
 
         except Exception as e_datalog:
             logger.error(f"[{cid}] Error during Datalog rule execution for claim {claim_id_str}: {e_datalog}", exc_info=True)

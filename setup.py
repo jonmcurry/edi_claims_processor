@@ -1,3 +1,4 @@
+# ./setup.py
 import random
 import string
 import psycopg2
@@ -7,7 +8,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 # Attempt to import pyDatalog, but make its usage conditional
 try:
-    import pyDatalog
+    from pyDatalog import pyDatalog
     PYDATALOG_AVAILABLE = True
 except ImportError:
     PYDATALOG_AVAILABLE = False
@@ -554,44 +555,33 @@ def query_sample_claims_postgres(limit=10):
         if conn: conn.close()
 
 
-def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules=50):
+def generate_random_rules(facility_ids_list, financial_class_codes_list, n_rules=3):
     """Generates a list of dictionaries, each containing a datalog rule name and definition."""
     rules = []
-    if not PYDATALOG_AVAILABLE: return rules
-    if not facility_ids_list and not financial_class_codes_list: return rules
-    
-    generated_names = set()
+    if not PYDATALOG_AVAILABLE:
+        return rules
+    if not facility_ids_list and not financial_class_codes_list:
+        return rules
 
-    for _ in range(n_rules):
-        choices = []
-        if facility_ids_list: choices.append("facility")
-        if financial_class_codes_list: choices.append("financial_class")
-        if not choices: choices.append("units") 
-        
-        rule_type = random.choice(choices)
-        rule_name = ""
-        rule_def = ""
+    # Define a set of rule templates that assert 'validation_error'
+    rule_templates = [
+        {
+            "name": "DLG_ERROR_FACILITY_NOT_ACTIVE",
+            "def": "validation_error(C, 'FACILITY_INACTIVE', 'facility_id', 'Facility ID on claim does not exist or is inactive') <= claim_attribute(C, 'facility_id', F), ~master_facility_active(F)"
+        },
+        {
+            "name": "DLG_ERROR_CHARGE_TOO_LOW",
+            "def": "validation_error(C, 'CHARGE_TOO_LOW', 'total_charge_amount', 'Total charge amount is less than 50') <= claim_attribute(C, 'total_charge_amount', A), A < 50"
+        },
+        {
+            "name": "DLG_ERROR_CHARGE_TOO_HIGH",
+            "def": "validation_error(C, 'CHARGE_TOO_HIGH', 'total_charge_amount', 'Total charge amount is over 20000') <= claim_attribute(C, 'total_charge_amount', A), A > 20000"
+        }
+    ]
 
-        if rule_type == "facility":
-            facility = random.choice(facility_ids_list)
-            rule_name = f"DLG_VALID_FACILITY_{facility}"
-            if rule_name not in generated_names:
-                rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, '{facility}', _, _, _, _, _, _, _, _, _)"
-        elif rule_type == "financial_class":
-            fin_class = random.choice(financial_class_codes_list)
-            rule_name = f"DLG_VALID_FINCLASS_{fin_class}"
-            if rule_name not in generated_names:
-                rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, '{fin_class}', _, _, _, _, _)"
-        else: # units rule
-            units = random.randint(1, 10)
-            rule_name = f"DLG_VALID_UNITS_GTE_{units}"
-            if rule_name not in generated_names:
-                 rule_def = f"valid_claim(CLAIM) <= claim(CLAIM, _, _, _, _, _, _, _, _, _, Units), Units >= {units}"
-        
-        if rule_name and rule_def:
-            rules.append({"name": rule_name, "definition": rule_def})
-            generated_names.add(rule_name)
-            
+    for rule_template in rule_templates:
+        rules.append(rule_template)
+
     return rules
 
 def insert_datalog_rules_to_db(rules_list):
@@ -621,7 +611,7 @@ def insert_datalog_rules_to_db(rules_list):
             data = {
                 "name": rule_dict['name'],
                 "version": 1, # Defaulting version to 1 for this setup script
-                "definition": rule_dict['definition']
+                "definition": rule_dict['def'] # Changed from 'definition' to 'def'
             }
             cur.execute(insert_query, data)
             if cur.rowcount > 0:
@@ -648,62 +638,46 @@ def test_pydatalog_rules(claims_data, generated_rules):
         print("Skipping pyDatalog test due to empty claims or rules.")
         return
 
-    print("Attempting pyDatalog tests. Note: This section may require user adaptation based on their pyDatalog version and API.")
+    print("\n--- Testing pyDatalog Rules Engine ---")
     try:
-        if hasattr(pyDatalog, 'Logic'):
-            logic = pyDatalog.Logic()
-            # Ensure terms used in rules and facts are declared for this Logic instance
-            # pyDatalog.create_terms('claim, valid_claim, CLAIM') # This would be global, not instance specific usually.
-            # For Logic instances, terms are often implicitly created or using logic. टर्म्स(...)
-            print("  pyDatalog.Logic() instance created. Interaction should use this 'logic' object (e.g., logic.add_clause, logic.ask).")
-            print("  The current script's global pyDatalog calls are likely incompatible.")
-            print("  Skipping detailed pyDatalog interaction; user adaptation needed for their pyDatalog version.")
-            return
+        pyDatalog.clear()
+        
+        # Define terms used in the new rules
+        pyDatalog.create_terms('claim_attribute, master_facility_active, validation_error, C, F, A, R, M')
 
-        cleared_context = False
-        if hasattr(pyDatalog, 'clear'):
-            pyDatalog.clear()
-            cleared_context = True
-            print("  Called pyDatalog.clear()")
-        elif hasattr(pyDatalog, 'program') and callable(getattr(pyDatalog.program, 'clear', None)):
-            pyDatalog.program().clear()
-            cleared_context = True
-            print("  Called pyDatalog.program().clear()")
+        # Load rule definitions
+        for rule_def in generated_rules:
+            pyDatalog.load(rule_def)
+        print(f"  Loaded {len(generated_rules)} rule definitions.")
 
-        if not cleared_context:
-            print("  No standard pyDatalog clear method found. Results may be cumulative if script is re-run.")
-
-        sample_size = min(len(claims_data), 5)
-        print(f"  Attempting to assert {sample_size} facts using global pyDatalog.assert_fact...")
-        if hasattr(pyDatalog, 'assert_fact'):
-            for c_item in random.sample(claims_data, sample_size):
-                pyDatalog.assert_fact('claim',
-                                      c_item["claim_id"], c_item["facility_id"], c_item["patient_account"],
-                                      str(c_item["start_date"]), str(c_item["end_date"]), c_item["financial_class"],
-                                      str(c_item["patient_dob"]),
-                                      str(c_item.get("service_line_start", "")), str(c_item.get("service_line_end", "")),
-                                      float(c_item["rvu"]), int(c_item["units"]))
+        # Assert facts for a sample claim
+        sample_claim = random.choice(claims_data)
+        claim_id = sample_claim['claim_id']
+        facility_id = sample_claim['facility_id']
+        charge_amount = float(sample_claim['total_charge_amount'])
+        
+        pyDatalog.assert_fact('claim_attribute', claim_id, 'facility_id', facility_id)
+        pyDatalog.assert_fact('claim_attribute', claim_id, 'total_charge_amount', charge_amount)
+        # To test the facility rule, we decide if this facility is active or not
+        if random.choice([True, False]):
+             pyDatalog.assert_fact('master_facility_active', facility_id)
+             print(f"  Asserted facts for claim {claim_id} with ACTIVE facility {facility_id} and charge {charge_amount}")
         else:
-            print("  pyDatalog.assert_fact not found.")
+             print(f"  Asserted facts for claim {claim_id} with INACTIVE facility {facility_id} and charge {charge_amount}")
 
-        print("  Attempting to load rules using global pyDatalog.load...")
-        if hasattr(pyDatalog, 'load'):
-            # The test function now receives a list of rule definitions, not dictionaries
-            for rule_str in random.sample(generated_rules, min(len(generated_rules), 5)):
-                pyDatalog.load(rule_str)
+
+        # Query for validation errors
+        errors = pyDatalog.ask(f'validation_error("{claim_id}", R, F, M)')
+        if errors and hasattr(errors, 'data'):
+            print(f"  SUCCESS: Datalog found validation errors for claim {claim_id}:")
+            # The 'errors' object is an Answer. Iterate over its 'data' attribute.
+            for rule_id, field, message in errors.data:
+                print(f"    - Rule: {rule_id}, Field: {field}, Message: {message}")
+        elif errors:
+             print(f"  SUCCESS: Datalog found validation errors for claim {claim_id} (result format unknown): {errors}")
         else:
-            print("  pyDatalog.load not found.")
+            print(f"  SUCCESS: Datalog found no validation errors for claim {claim_id}.")
 
-        print("  Attempting to ask query using global pyDatalog.ask...")
-        if hasattr(pyDatalog, 'ask'):
-            result = pyDatalog.ask('valid_claim(CLAIM)')
-            if result: print(f"  Datalog: {len(result.answers)} claims matched a rule from sample.")
-            else: print("  Datalog: No claims matched any rule from sample.")
-        else:
-            print("  pyDatalog.ask not found.")
-
-    except AttributeError as ae:
-        print(f"  pyDatalog AttributeError: {ae}. Your pyDatalog version may require using a pyDatalog.Logic() object and its methods.")
     except Exception as e:
         print(f"  An error occurred during pyDatalog testing: {e}")
 
@@ -746,14 +720,13 @@ def main():
         query_sample_claims_postgres(limit=5)
 
         print("\n--- Step 7: Generating pyDatalog Rules ---")
-        datalog_rules = generate_random_rules(fac_ids_list, fc_codes_list_master, n_rules=50)
+        datalog_rules = generate_random_rules(fac_ids_list, fc_codes_list_master)
 
         print("\n--- Step 7.5: Storing pyDatalog Rules in DB ---")
         insert_datalog_rules_to_db(datalog_rules)
 
-        print("\n--- Step 8: Testing pyDatalog Rules Engine ---")
         # Pass just the rule definitions to the test function
-        rule_definitions_for_test = [r['definition'] for r in datalog_rules]
+        rule_definitions_for_test = [r['def'] for r in datalog_rules]
         test_pydatalog_rules(claims_for_pg, rule_definitions_for_test)
 
         print("\n=== Setup Complete ===")
