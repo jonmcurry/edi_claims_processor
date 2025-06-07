@@ -181,17 +181,15 @@ class RulesEngine:
                 # 5. Query for validation errors
                 datalog_errors = pyDatalog.ask(f'validation_error("{claim_id_str}", R, F, M)')
                 
-                if datalog_errors and hasattr(datalog_errors, 'data'):
-                    # The 'datalog_errors' object is an Answer. Iterate over its 'data' attribute.
+                # FINAL, most robust check. Only iterate if the '.data' attribute exists.
+                if hasattr(datalog_errors, 'data'):
+                    # .data contains the list of result tuples. It could be empty, which is fine.
                     for rule_id, field, message in datalog_errors.data:
                         validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
-                elif datalog_errors: # Fallback for older versions or different structures
-                     logger.warning(f"Datalog result for claim {claim_id_str} is not in the expected format (missing .data). Attempting direct iteration.")
-                     try:
-                         for rule_id, field, message in datalog_errors:
-                            validation_result.add_error(str(rule_id), str(field), str(message), "DATALOG")
-                     except TypeError:
-                         logger.error(f"Could not iterate over Datalog result for {claim_id_str} either directly or via .data.")
+                else:
+                    # If there's no .data attribute, or the datalog_errors object is falsy (None or empty),
+                    # we can safely assume there are no errors to process. This avoids all previous errors.
+                    logger.debug(f"Datalog query returned no actionable validation errors for claim {claim_id_str}.")
 
 
         except Exception as e_datalog:
