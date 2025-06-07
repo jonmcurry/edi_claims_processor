@@ -38,7 +38,7 @@ pip install -r requirements.txt
 uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Run main application (batch processing from database)
-python -m app.main --run_all_processing
+python -m app.main --run-all-processing
 Production Mode on Windows# Use hypercorn instead of uvicorn with uvloop
 hypercorn app.api.main:app --bind 0.0.0.0:8000 --workers 4
 

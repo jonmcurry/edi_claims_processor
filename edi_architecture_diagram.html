@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDI CMS 1500 Claims Processing System Architecture</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .architecture-diagram {
+            width: 100%;
+            height: 900px;
+            border: 2px solid #e1e8ed;
+            border-radius: 15px;
+            background: #f8fafc;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .layer {
+            position: absolute;
+            border-radius: 12px;
+            padding: 15px;
+            font-weight: 600;
+            text-align: center;
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+            border: 2px solid rgba(255,255,255,0.2);
+        }
+        
+        .layer:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+        }
+        
+        /* API Layer */
+        .api-layer {
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        /* Processing Pipeline */
+        .pipeline {
+            top: 100px;
+            left: 20px;
+            right: 20px;
+            height: 120px;
+            background: linear-gradient(135deg, #11998e, #38ef7d);
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            padding: 10px;
+        }
+        
+        .pipeline-stage {
+            background: rgba(255,255,255,0.2);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            margin: 2px;
+            backdrop-filter: blur(10px);
+        }
+        
+        /* Core Components */
+        .rules-engine {
+            top: 240px;
+            left: 20px;
+            width: 200px;
+            height: 100px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+        }
+        
+        .ml-predictor {
+            top: 240px;
+            left: 240px;
+            width: 200px;
+            height: 100px;
+            background: linear-gradient(135deg, #f093fb, #f5576c);
+        }
+        
+        .reimbursement-calc {
+            top: 240px;
+            left: 460px;
+            width: 200px;
+            height: 100px;
+            background: linear-gradient(135deg, #4facfe, #00f2fe);
+        }
+        
+        .connection-manager {
+            top: 240px;
+            right: 20px;
+            width: 200px;
+            height: 100px;
+            background: linear-gradient(135deg, #fa709a, #fee140);
+        }
+        
+        /* Databases */
+        .postgres-staging {
+            top: 370px;
+            left: 20px;
+            width: 280px;
+            height: 140px;
+            background: linear-gradient(135deg, #336791, #4a90e2);
+        }
+        
+        .postgres-metrics {
+            top: 370px;
+            left: 320px;
+            width: 200px;
+            height: 140px;
+            background: linear-gradient(135deg, #336791, #5bc0de);
+        }
+        
+        .sql-server-prod {
+            top: 370px;
+            right: 20px;
+            width: 280px;
+            height: 140px;
+            background: linear-gradient(135deg, #d73027, #f46d43);
+        }
+        
+        /* Failed Claims & UI */
+        .failed-claims-ui {
+            top: 530px;
+            left: 20px;
+            width: 300px;
+            height: 100px;
+            background: linear-gradient(135deg, #ff6b6b, #feca57);
+        }
+        
+        .analytics-dashboard {
+            top: 530px;
+            right: 20px;
+            width: 300px;
+            height: 100px;
+            background: linear-gradient(135deg, #a8edea, #fed6e3);
+        }
+        
+        /* Optimization Layer */
+        .optimization {
+            bottom: 120px;
+            left: 20px;
+            right: 20px;
+            height: 80px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            display: flex;
+            align-items: center;
+            justify-content: space-around;
+            flex-wrap: wrap;
+        }
+        
+        .opt-feature {
+            background: rgba(255,255,255,0.2);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            margin: 2px;
+            backdrop-filter: blur(10px);
+        }
+        
+        /* Configuration */
+        .config {
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            height: 60px;
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        /* Data Flow Arrows */
+        .arrow {
+            position: absolute;
+            color: #667eea;
+            font-size: 24px;
+            z-index: 10;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+        
+        .arrow-down {
+            top: 85px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        .arrow-to-db {
+            top: 350px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        .arrow-to-ui {
+            top: 515px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        /* Performance Metrics */
+        .metrics-badge {
+            position: absolute;
+            top: 10px;
+            right: 20px;
+            background: linear-gradient(135deg, #ff6b6b, #feca57);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        /* Database Tables */
+        .db-table {
+            font-size: 10px;
+            background: rgba(255,255,255,0.3);
+            margin: 3px 0;
+            padding: 2px 5px;
+            border-radius: 4px;
+            text-align: left;
+        }
+        
+        /* Responsive Design */
+        @media (max-width: 1200px) {
+            .architecture-diagram {
+                height: 1100px;
+            }
+            
+            .layer {
+                font-size: 12px;
+                padding: 10px;
+            }
+            
+            .pipeline {
+                height: 140px;
+            }
+            
+            .rules-engine, .ml-predictor, .reimbursement-calc, .connection-manager {
+                width: 160px;
+                top: 260px;
+            }
+            
+            .ml-predictor {
+                left: 190px;
+            }
+            
+            .reimbursement-calc {
+                left: 360px;
+            }
+            
+            .postgres-staging, .sql-server-prod {
+                width: 240px;
+                top: 390px;
+            }
+            
+            .postgres-metrics {
+                width: 160px;
+                top: 390px;
+                left: 280px;
+            }
+            
+            .failed-claims-ui, .analytics-dashboard {
+                width: 250px;
+                top: 550px;
+            }
+        }
+        
+        .legend {
+            margin-top: 30px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: #f8fafc;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏥 EDI CMS 1500 Claims Processing System Architecture</h1>
+        
+        <div class="metrics-badge">
+            Target: 6,667 claims/sec
+        </div>
+        
+        <div class="architecture-diagram">
+            <!-- API Layer -->
+            <div class="layer api-layer">
+                🌐 REST API Layer - FastAPI/Uvicorn (Port 8000) - Rate Limiting & CORS
+            </div>
+            
+            <!-- Data Flow Arrows -->
+            <div class="arrow arrow-down">⬇️</div>
+            
+            <!-- Processing Pipeline -->
+            <div class="layer pipeline">
+                <div class="pipeline-stage">📥 INGEST</div>
+                <div class="pipeline-stage">✅ VALIDATE</div>
+                <div class="pipeline-stage">🤖 ML PREDICT</div>
+                <div class="pipeline-stage">💰 CALCULATE</div>
+                <div class="pipeline-stage">📤 EXPORT</div>
+                <div class="pipeline-stage">🔄 ASYNC BATCH PROCESSING</div>
+                <div class="pipeline-stage">🚀 PIPELINE PARALLELIZATION</div>
+            </div>
+            
+            <!-- Core Processing Components -->
+            <div class="layer rules-engine">
+                <strong>⚖️ Rules Engine</strong><br>
+                <small>
+                    • Python Validation<br>
+                    • Datalog Rules<br>
+                    • Facility Validation<br>
+                    • Business Logic
+                </small>
+            </div>
+            
+            <div class="layer ml-predictor">
+                <strong>🧠 ML Predictor</strong><br>
+                <small>
+                    • Random Forest Model<br>
+                    • Filter Prediction<br>
+                    • 80% Confidence Threshold<br>
+                    • Fallback to Rules
+                </small>
+            </div>
+            
+            <div class="layer reimbursement-calc">
+                <strong>💵 Reimbursement Calculator</strong><br>
+                <small>
+                    • RVU × Units × $36.04<br>
+                    • Memory-Mapped RVU Cache<br>
+                    • Line Item Processing
+                </small>
+            </div>
+            
+            <div class="layer connection-manager">
+                <strong>🔗 Connection Manager</strong><br>
+                <small>
+                    • Connection Pooling<br>
+                    • Health Checks<br>
+                    • Read/Write Splitting<br>
+                    • Auto Reconnection
+                </small>
+            </div>
+            
+            <div class="arrow arrow-to-db">⬇️</div>
+            
+            <!-- Database Layer -->
+            <div class="layer postgres-staging">
+                <strong>🐘 PostgreSQL Staging DB</strong><br>
+                <div class="db-table">📋 staging.claims (partitioned)</div>
+                <div class="db-table">🩺 staging.cms1500_diagnoses</div>
+                <div class="db-table">💊 staging.cms1500_line_items</div>
+                <div class="db-table">✅ staging.validation_results</div>
+                <div class="db-table">🏥 edi.facilities</div>
+                <div class="db-table">🔧 edi.filters</div>
+            </div>
+            
+            <div class="layer postgres-metrics">
+                <strong>📊 PostgreSQL Metrics</strong><br>
+                <div class="db-table">📈 Processing Metrics</div>
+                <div class="db-table">⏱️ Performance Stats</div>
+                <div class="db-table">🔍 Audit Logs</div>
+                <div class="db-table">🚨 Alert History</div>
+            </div>
+            
+            <div class="layer sql-server-prod">
+                <strong>🏢 SQL Server Production DB</strong><br>
+                <div class="db-table">✅ production.claims</div>
+                <div class="db-table">❌ production.failed_claims</div>
+                <div class="db-table">🏥 production.facilities</div>
+                <div class="db-table">💳 RVU Lookup Tables</div>
+                <div class="db-table">📋 Claims Summaries (UI)</div>
+            </div>
+            
+            <div class="arrow arrow-to-ui">⬇️</div>
+            
+            <!-- UI Layer -->
+            <div class="layer failed-claims-ui">
+                <strong>🚨 Failed Claims Management UI</strong><br>
+                <small>
+                    • Real-time Sync Status<br>
+                    • Claim Resolution Workflows<br>
+                    • Error Categorization<br>
+                    • AI Repair Suggestions
+                </small>
+            </div>
+            
+            <div class="layer analytics-dashboard">
+                <strong>📊 Analytics Dashboard</strong><br>
+                <small>
+                    • Failure Pattern Analysis<br>
+                    • Performance Metrics<br>
+                    • Processing Trends<br>
+                    • Business Intelligence
+                </small>
+            </div>
+            
+            <!-- Optimization Features -->
+            <div class="layer optimization">
+                <div class="opt-feature">🚀 Async Processing</div>
+                <div class="opt-feature">🔄 Connection Pool Warming</div>
+                <div class="opt-feature">💾 Memory-Mapped Caching</div>
+                <div class="opt-feature">📖 Database Read Replicas</div>
+                <div class="opt-feature">🛡️ Circuit Breakers</div>
+                <div class="opt-feature">📝 Comprehensive Logging</div>
+                <div class="opt-feature">🔐 PII/PHI Protection</div>
+                <div class="opt-feature">⚡ Bulk Batch Operations</div>
+            </div>
+            
+            <!-- Configuration Layer -->
+            <div class="layer config">
+                📄 config.yaml - Centralized Configuration Management
+            </div>
+        </div>
+        
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #667eea, #764ba2);"></div>
+                <span><strong>API & Core Services:</strong> FastAPI endpoints, rules engine, core processing</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #f093fb, #f5576c);"></div>
+                <span><strong>Machine Learning:</strong> Filter prediction, model training, AI-powered features</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #336791, #4a90e2);"></div>
+                <span><strong>PostgreSQL:</strong> Staging database, metrics storage, master data</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #d73027, #f46d43);"></div>
+                <span><strong>SQL Server:</strong> Production database, failed claims, RVU data</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #11998e, #38ef7d);"></div>
+                <span><strong>Processing Pipeline:</strong> Async batch processing, pipeline parallelization</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: linear-gradient(135deg, #ff6b6b, #feca57);"></div>
+                <span><strong>User Interface:</strong> Failed claims management, analytics dashboards</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Add interactive hover effects
+        document.querySelectorAll('.layer').forEach(layer => {
+            layer.addEventListener('mouseenter', function() {
+                this.style.transform = 'translateY(-3px) scale(1.02)';
+                this.style.zIndex = '100';
+            });
+            
+            layer.addEventListener('mouseleave', function() {
+                this.style.transform = 'translateY(0) scale(1)';
+                this.style.zIndex = '1';
+            });
+        });
+
+        // Add click handler for detailed information
+        document.querySelectorAll('.layer').forEach(layer => {
+            layer.addEventListener('click', function() {
+                const title = this.querySelector('strong')?.textContent || 'Component Details';
+                alert(`${title}\n\nClick to expand component details in a real implementation.`);
+            });
+        });
+
+        // Performance metrics animation
+        let throughputCounter = 0;
+        const metricsElement = document.querySelector('.metrics-badge');
+        
+        setInterval(() => {
+            throughputCounter = (throughputCounter + 100) % 7000;
+            metricsElement.innerHTML = `Processing: ${throughputCounter.toLocaleString()} claims/sec`;
+        }, 500);
+    </script>
+</body>
+</html>

@@ -10,10 +10,10 @@ import sys
 import multiprocessing
 import psutil
 from typing import List, Any, Dict, Optional, Callable, Awaitable
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -24,7 +24,7 @@ from app.database.postgres_handler import get_pending_claims_for_processing, upd
 from app.processing.rules_engine import RulesEngine, ClaimValidationResult
 from app.processing.ml_predictor import get_ml_predictor
 from app.processing.reimbursement_calculator import ReimbursementCalculator
-from app.processing.claims_processor import OptimizedClaimsProcessor
+from app.processing.claims_processor import OptimizedClaimsProcessor, StagingClaim
 
 try:
     from app.utils.platform_config import PLATFORM_CONFIG, configure_multiprocessing as configure_platform_mp
@@ -89,7 +89,7 @@ class PipelineProcessingMetrics:
 class ClaimWorkItem:
     claim_id: str
     current_stage: ProcessingStage
-    data: Any
+    data: Dict[str, Any] # Changed to Dict to hold serialized data
     created_at: float = field(default_factory=time.perf_counter)
     stage_start_time: float = field(default_factory=time.perf_counter)
     retries: int = 0
@@ -160,7 +160,8 @@ class OptimizedPipelineProcessor:
             self.rules_engine = RulesEngine(temp_ro_session)
         self.claims_processor = OptimizedClaimsProcessor(self.pg_session_factory, self.sql_session_factory, self.app_config, self.rules_engine, self.ml_predictor, self.reimbursement_calculator)
 
-    async def run_pipeline(self):
+    async def start_processing(self):
+        """The main async method that sets up and runs the pipeline stages."""
         self._initialize_shared_components()
         if not self.rules_engine:
             logger.critical("Pipeline cannot start: RulesEngine failed to initialize.")
@@ -176,17 +177,67 @@ class OptimizedPipelineProcessor:
         self.active_pipeline_tasks = [asyncio.create_task(coro()) for coro in stage_methods.values()]
         await asyncio.gather(*self.active_pipeline_tasks, return_exceptions=True)
 
+    def _serialize_claim(self, claim: StagingClaim) -> Dict[str, Any]:
+        """Serializes a SQLAlchemy ORM object to a dictionary, including relationships."""
+        if not claim:
+            return {}
+        
+        data = {c.name: getattr(claim, c.name) for c in claim.__table__.columns}
+        
+        if 'cms1500_diagnoses' in claim.__dict__:
+            data['cms1500_diagnoses'] = [{c.name: getattr(diag, c.name) for c in diag.__table__.columns} for diag in claim.cms1500_diagnoses]
+        if 'cms1500_line_items' in claim.__dict__:
+             data['cms1500_line_items'] = [{c.name: getattr(line, c.name) for c in line.__table__.columns} for line in claim.cms1500_line_items]
+    
+        def convert_types(obj):
+            if isinstance(obj, dict):
+                return {k: convert_types(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [convert_types(i) for i in obj]
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            if isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+
+        return convert_types(data)
+
+    def _fetch_claims_in_thread(self, session_factory, batch_size, status):
+        """Synchronous function to fetch claims and serialize them before the session closes."""
+        with session_factory() as session:
+            try:
+                claims_orm = get_pending_claims_for_processing(session, batch_size, status)
+                session.commit()
+                return [self._serialize_claim(claim) for claim in claims_orm]
+            except Exception as e:
+                logger.error(f"Error in _fetch_claims_in_thread: {e}", exc_info=True)
+                session.rollback()
+                raise
+
     async def _fetch_stage_producer(self):
+        loop = asyncio.get_running_loop()
         while not self.shutdown_event.is_set():
             try:
                 if self.stage_queues[ProcessingStage.VALIDATE].qsize() >= self.queue_high_water_mark:
                     await asyncio.sleep(0.1)
                     continue
-                with self.pg_session_factory(read_only=True) as ro_pg_session:
-                    claims = await asyncio.get_running_loop().run_in_executor(self.io_executor, get_pending_claims_for_processing, ro_pg_session, self.initial_fetch_batch_size, 'PENDING')
-                if claims:
-                    for claim in claims:
-                        await self.stage_queues[ProcessingStage.VALIDATE].put(ClaimWorkItem(claim_id=claim.claim_id, current_stage=ProcessingStage.FETCH, data=claim))
+
+                claims_data_list = await loop.run_in_executor(
+                    self.io_executor,
+                    self._fetch_claims_in_thread,
+                    self.pg_session_factory,
+                    self.initial_fetch_batch_size,
+                    'PENDING'
+                )
+
+                if claims_data_list:
+                    for claim_dict in claims_data_list:
+                        if claim_dict: # Ensure dict is not empty
+                            await self.stage_queues[ProcessingStage.VALIDATE].put(ClaimWorkItem(
+                                claim_id=claim_dict['claim_id'],
+                                current_stage=ProcessingStage.FETCH,
+                                data=claim_dict
+                            ))
                 else:
                     await asyncio.sleep(2)
             except Exception as e:
@@ -208,30 +259,49 @@ class OptimizedPipelineProcessor:
                     await output_q.put(processed_item)
                 elif not output_q and processed_item:
                     self.metrics.total_claims_processed_successfully += 1
-                else:
+                elif not processed_item:
                     self.metrics.total_claims_failed += 1
                 input_q.task_done()
             except Exception as e:
                 logger.error(f"[{stage_name}] Error processing item: {e}", exc_info=True)
                 if 'item' in locals():
                     await self._handle_failed_item(item, e)
+                    self.metrics.total_claims_failed += 1
+                input_q.task_done()
 
     async def _process_item_validation(self, work_item: ClaimWorkItem) -> Optional[ClaimWorkItem]:
         loop = asyncio.get_running_loop()
-        def sync_validate():
-            with self.pg_session_factory(read_only=True) as validation_session:
-                return self.rules_engine.validate_claim(validation_session, work_item.data)
+        def sync_validate_and_update_on_fail():
+            with self.pg_session_factory() as session:
+                try:
+                    claim_orm = session.query(StagingClaim).options(
+                        selectinload(StagingClaim.cms1500_diagnoses),
+                        selectinload(StagingClaim.cms1500_line_items)
+                    ).filter(StagingClaim.claim_id == work_item.claim_id).one_or_none()
 
-        validation_result = await loop.run_in_executor(self.io_executor, sync_validate)
-        work_item.validation_result = validation_result
-        
-        if not validation_result.is_overall_valid:
-            logger.warning(f"Claim {work_item.claim_id} failed validation: {validation_result.errors}")
-            with self.pg_session_factory() as write_session:
-                update_staging_claim_status(write_session, work_item.claim_id, validation_result.final_status_staging, [e['message'] for e in validation_result.errors])
-                write_session.commit()
-            return None
-        return work_item
+                    if not claim_orm:
+                        logger.error(f"Claim {work_item.claim_id} not found in DB for validation stage.")
+                        return None
+
+                    validation_result = self.rules_engine.validate_claim(session, claim_orm)
+                    work_item.validation_result = validation_result
+
+                    if not validation_result.is_overall_valid:
+                        update_staging_claim_status(
+                            session,
+                            work_item.claim_id,
+                            validation_result.final_status_staging,
+                            [e['message'] for e in validation_result.errors]
+                        )
+                        session.commit()
+                        return None
+                    
+                    return work_item
+                except Exception as e:
+                    logger.error(f"Exception in validation sync block for claim {work_item.claim_id}: {e}", exc_info=True)
+                    session.rollback()
+                    raise
+        return await loop.run_in_executor(self.io_executor, sync_validate_and_update_on_fail)
 
     async def _process_item_ml_prediction(self, work_item: ClaimWorkItem) -> ClaimWorkItem:
         loop = asyncio.get_running_loop()
@@ -243,34 +313,52 @@ class OptimizedPipelineProcessor:
     async def _process_item_reimbursement(self, work_item: ClaimWorkItem) -> ClaimWorkItem:
         loop = asyncio.get_running_loop()
         def sync_reimbursement():
-            self.reimbursement_calculator.process_claim_reimbursement(work_item.data)
-            return {"total": float(getattr(work_item.data, 'total_estimated_reimbursement', 0))}
+             with self.pg_session_factory() as session:
+                claim_orm = session.query(StagingClaim).options(
+                    selectinload(StagingClaim.cms1500_line_items)
+                ).filter(StagingClaim.claim_id == work_item.claim_id).one_or_none()
+                if claim_orm:
+                    self.reimbursement_calculator.process_claim_reimbursement(claim_orm)
+                    return {"total": float(getattr(claim_orm, 'total_estimated_reimbursement', 0))}
+                return {"total": 0.0}
+
         work_item.reimbursement_details = await loop.run_in_executor(self.io_executor, sync_reimbursement)
         return work_item
         
     async def _process_item_export(self, work_item: ClaimWorkItem) -> Optional[ClaimWorkItem]:
         loop = asyncio.get_running_loop()
-        def sync_export():
-            return self.claims_processor.process_single_claim_pipeline_style(work_item.data)
-        
-        processing_result = await loop.run_in_executor(self.io_executor, sync_export)
-        
-        # Now, perform the DB operations based on the result
         def db_operations():
             try:
-                if processing_result.is_overall_valid:
-                    with self.sql_session_factory() as sql_session:
-                        prod_orm = self.claims_processor._map_staging_to_production_orm(work_item.data, processing_result.ml_assigned_filters)
+                with self.pg_session_factory() as pg_session, self.sql_session_factory() as sql_session:
+                    staging_claim_orm = pg_session.query(StagingClaim).options(
+                        selectinload(StagingClaim.cms1500_diagnoses),
+                        selectinload(StagingClaim.cms1500_line_items)
+                    ).filter(StagingClaim.claim_id == work_item.claim_id).one_or_none()
+
+                    if not staging_claim_orm:
+                        logger.error(f"Claim {work_item.claim_id} disappeared from DB before export.")
+                        return False
+
+                    if work_item.ml_prediction:
+                        staging_claim_orm.pipeline_ml_prediction = work_item.ml_prediction
+
+                    processing_result = self.claims_processor.process_single_claim_pipeline_style(staging_claim_orm)
+                    
+                    if processing_result.is_overall_valid:
+                        prod_orm = self.claims_processor._map_staging_to_production_orm(staging_claim_orm, processing_result.ml_assigned_filters)
                         sql_session.add(prod_orm)
-                        sql_session.commit()
-                else:
-                    with self.sql_session_factory() as sql_session:
-                        failed_orm = self.claims_processor._create_failed_claim_detail_orm(work_item.data, processing_result)
+                    else:
+                        failed_orm = self.claims_processor._create_failed_claim_detail_orm(staging_claim_orm, processing_result)
                         sql_session.add(failed_orm)
-                        sql_session.commit()
-                
-                with self.pg_session_factory() as pg_session:
-                    update_staging_claim_status(pg_session, work_item.claim_id, processing_result.final_status_staging, [e['message'] for e in processing_result.errors_for_failed_log])
+                    
+                    sql_session.commit()
+                    
+                    update_staging_claim_status(
+                        pg_session, 
+                        work_item.claim_id, 
+                        processing_result.final_status_staging, 
+                        [e['message'] for e in processing_result.errors_for_failed_log]
+                    )
                     pg_session.commit()
                 return True
             except Exception as e:
@@ -280,23 +368,45 @@ class OptimizedPipelineProcessor:
         export_successful = await loop.run_in_executor(self.io_executor, db_operations)
         return work_item if export_successful else None
 
-    async def _handle_failed_item(self, item, error):
+    async def _handle_failed_item(self, item: ClaimWorkItem, error: Exception):
         logger.error(f"Item {item.claim_id} failed in stage {item.current_stage.value}: {error}", exc_info=True)
-        # Implement dead-letter queue or error state update logic here
-        
+        try:
+            with self.pg_session_factory() as session:
+                update_staging_claim_status(session, item.claim_id, "ERROR_PIPELINE", [f"Pipeline error in stage {item.current_stage.value}: {str(error)}"])
+                session.commit()
+        except Exception as db_err:
+            logger.critical(f"CRITICAL: Failed to mark claim {item.claim_id} as ERROR in DB after pipeline failure: {db_err}")
+
     async def stop_pipeline(self):
         self.shutdown_event.set()
         for task in self.active_pipeline_tasks:
             task.cancel()
         await asyncio.gather(*self.active_pipeline_tasks, return_exceptions=True)
+        self.io_executor.shutdown(wait=False, cancel_futures=True)
+        self.cpu_executor.shutdown(wait=False, cancel_futures=True)
+
 
 class BatchProcessor:
     def __init__(self, pg_session_factory, sql_session_factory, config):
         self.pipeline_processor = OptimizedPipelineProcessor(pg_session_factory, sql_session_factory, config)
 
-    def run_main_batch_processing_loop(self):
-        loop = asyncio.get_event_loop()
+    def run_processing_pipeline(self):
+        """The main entry point to start the processing loop."""
+        if sys.platform == "win32":
+            loop = asyncio.get_event_loop()
+        else:
+            try:
+                import uvloop
+                uvloop.install()
+                loop = uvloop.new_event_loop()
+                asyncio.set_event_loop(loop)
+            except ImportError:
+                loop = asyncio.get_event_loop()
+
         try:
-            loop.run_until_complete(self.pipeline_processor.run_pipeline())
+            loop.run_until_complete(self.pipeline_processor.start_processing())
         except KeyboardInterrupt:
+            logger.info("Shutdown signal received. Stopping pipeline...")
             loop.run_until_complete(self.pipeline_processor.stop_pipeline())
+        finally:
+            logger.info("Pipeline has been shut down.")

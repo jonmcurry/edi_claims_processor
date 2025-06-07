@@ -11,9 +11,8 @@ import threading
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-# Corrected pyDatalog imports to be thread-safe and to get Var correctly
+# Corrected pyDatalog imports for thread-safe operation
 from pyDatalog import pyDatalog, Logic
-from pyDatalog.pyDatalog import Var as pyDatalogVar
 
 from app.utils.logging_config import get_logger, get_correlation_id
 from app.utils.error_handler import ValidationError as AppValidationError, StagingDBError
@@ -26,6 +25,7 @@ from app.database.models.postgres_models import (
 from app.database.postgres_handler import perform_direct_staging_claim_validations
 
 logger = get_logger('app.processing.rules_engine')
+
 
 # Status constants
 STATUS_PYTHON_VALIDATION_FAILED = "VALIDATION_PYTHON_FAILED"
@@ -98,16 +98,20 @@ class RulesEngine:
                 RulesEngine._datalog_rules_loaded_main_thread = True
     
     def _initialize_datalog_for_thread(self):
-        """Initializes pyDatalog for the current thread if not already done."""
-        # pyDatalog uses thread-local storage. We need to initialize it in each new thread.
-        if not hasattr(Logic.tl, 'logic'):
-             pyDatalog.create_terms('Logic')
-             Logic.create_default_logic()
-             # Load the globally stored rule definitions into the new thread's logic context
-             if RulesEngine._loaded_datalog_definitions:
-                 for rule_def in RulesEngine._loaded_datalog_definitions:
-                     pyDatalog.load(rule_def)
-                 logger.debug(f"Initialized pyDatalog for thread {threading.get_ident()} and loaded {len(RulesEngine._loaded_datalog_definitions)} rules.")
+        """Initializes pyDatalog for the current thread by loading rules."""
+        if not getattr(pyDatalog.Logic.tl, 'rules_loaded', False):
+            pyDatalog.clear()
+            # Define terms used in rules
+            pyDatalog.create_terms('claim, claim_attribute, master_facility_exists, master_facility_active, validation_error')
+            if RulesEngine._loaded_datalog_definitions:
+                for rule_def in RulesEngine._loaded_datalog_definitions:
+                    try:
+                        pyDatalog.load(rule_def)
+                    except Exception as e:
+                        logger.error(f"Error loading Datalog rule into thread-local logic: {e}", exc_info=True)
+            
+            pyDatalog.Logic.tl.rules_loaded = True
+            logger.debug(f"Initialized Datalog context and loaded {len(RulesEngine._loaded_datalog_definitions)} rules for thread {threading.get_ident()}.")
 
     def _load_and_store_datalog_rules(self, pg_session: Session):
         """Loads Datalog rules from DB and stores definitions globally."""
@@ -122,7 +126,6 @@ class RulesEngine:
                 logger.warning(f"[{cid}] No active Datalog rules found in edi.filters table.")
                 return
 
-            # Store rule definitions in the class variable to be loaded by each thread
             RulesEngine._loaded_datalog_definitions = []
             for rule_orm_obj in active_rules_orm:
                 datalog_statements = [
@@ -139,14 +142,12 @@ class RulesEngine:
 
     def _assert_claim_facts(self, claim: StagingClaim, pg_read_session: Session):
         """Asserts facts about a claim into the Datalog engine for the current thread."""
-        cid = get_correlation_id()
         claim_id_str = str(claim.claim_id)
         
         pyDatalog.assert_fact('claim', claim_id_str)
         if claim.facility_id: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'facility_id', str(claim.facility_id))
         if claim.financial_class_id: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'financial_class_id', str(claim.financial_class_id))
         if claim.total_charge_amount is not None: pyDatalog.assert_fact('claim_attribute', claim_id_str, 'total_charge_amount', float(claim.total_charge_amount))
-        # Add other assertions...
         
         if claim.facility_id:
             facility_master = pg_read_session.query(EDIFacility.active).filter(EDIFacility.facility_id == claim.facility_id).first()
@@ -156,14 +157,13 @@ class RulesEngine:
 
     def _retract_claim_facts(self, claim: StagingClaim):
         """Retracts facts specific to a claim to clean the Datalog engine for the current thread."""
-        V = pyDatalogVar() # Correctly use the imported Var
+        V = pyDatalog.Variable()
         claim_id_str = str(claim.claim_id)
         
         pyDatalog.retract_fact('claim', claim_id_str)
         pyDatalog.retract_fact('claim_attribute', claim_id_str, V, V)
         pyDatalog.retract_fact('master_facility_exists', claim_id_str)
         pyDatalog.retract_fact('master_facility_active', claim_id_str)
-        # Add other retractions...
 
     def validate_claim(self, pg_validation_session: Session, claim_orm: StagingClaim) -> ClaimValidationResult:
         """Validates a single claim using both Python checks and Datalog rules."""
@@ -183,14 +183,11 @@ class RulesEngine:
             logger.error(f"[{cid}] Unhandled error in Python validation phase for {claim_id_str}: {e}", exc_info=True)
             validation_result.add_error("PYTHON_VALIDATION_ERR", "System", str(e), "PYTHON")
         
-        # Datalog Validation
         try:
-            # Initialize Datalog engine for the current thread context
             self._initialize_datalog_for_thread()
-            
             self._assert_claim_facts(claim_orm, pg_validation_session)
-
-            X, R, F, M = pyDatalogVar(), pyDatalogVar(), pyDatalogVar(), pyDatalogVar()
+            
+            R, F, M = pyDatalog.Variable(), pyDatalog.Variable(), pyDatalog.Variable()
             datalog_errors = pyDatalog.ask(f'validation_error("{claim_id_str}", R, F, M)')
             if datalog_errors:
                 for rule_id, field, message in datalog_errors:
@@ -201,7 +198,6 @@ class RulesEngine:
             logger.error(f"[{cid}] Error during Datalog rule execution for claim {claim_id_str}: {e_datalog}", exc_info=True)
             validation_result.add_error("DATALOG_ENGINE_ERROR", "DatalogExecution", f"Datalog engine error: {e_datalog}", "SYSTEM")
 
-        # Finalize status
         if validation_result.is_overall_valid:
             validation_result.final_status_staging = STATUS_VALIDATION_PASSED
             logger.info(f"[{cid}] Claim ID: {claim_id_str} PASSED all validations.")

@@ -42,7 +42,7 @@ def run_batch_processing():
         )
 
         # Start the processing loop
-        batch_processor.run_main_batch_processing_loop()
+        batch_processor.run_processing_pipeline()
 
         logger.info(f"[{main_cid}] Batch processing run completed.")
 

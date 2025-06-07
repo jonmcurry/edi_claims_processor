@@ -75,53 +75,37 @@ def get_pending_claims_for_processing(pg_session: Session, batch_size: int, stat
     """
     cid = get_correlation_id()
     logger.debug(f"[{cid}] Attempting to fetch and lock up to {batch_size} claims with status '{status}'.")
-    
+
     try:
-        # Step 1: Select and lock claim_ids to be processed.
-        # FOR UPDATE SKIP LOCKED ensures that different workers don't grab the same rows.
-        claim_ids_to_process_stmt = text(f"""
-            SELECT claim_id FROM staging.claims
-            WHERE processing_status = :status
-            ORDER BY created_date
-            LIMIT :batch_size
-            FOR UPDATE SKIP LOCKED
-        """)
-        
-        # This needs to be in a transaction
-        with pg_session.begin_nested():
-            result_proxy = pg_session.execute(
-                claim_ids_to_process_stmt,
-                {"status": status, "batch_size": batch_size}
-            )
-            claim_ids = [row[0] for row in result_proxy]
-
-        if not claim_ids:
-            logger.debug(f"[{cid}] No claims with status '{status}' found to process at this moment.")
-            return []
-
-        # Step 2: Update the status of these selected claims to 'PROCESSING'.
-        update_stmt = (
-            update(StagingClaim)
-            .where(StagingClaim.claim_id.in_(claim_ids))
-            .values(processing_status='PROCESSING', updated_date=datetime.utcnow())
-            .execution_options(synchronize_session=False) # Important for performance
-        )
-        pg_session.execute(update_stmt)
-
-        # Step 3: Fetch the full ORM objects for the claims that were just updated.
-        claims = (
+        # Atomically select, lock, and retrieve claims using with_for_update
+        # This is a cleaner and more direct way to achieve "SELECT ... FOR UPDATE SKIP LOCKED"
+        claims_to_process = (
             pg_session.query(StagingClaim)
             .options(
                 selectinload(StagingClaim.cms1500_diagnoses),
                 selectinload(StagingClaim.cms1500_line_items)
             )
-            .filter(StagingClaim.claim_id.in_(claim_ids))
+            .filter(StagingClaim.processing_status == status)
+            .order_by(StagingClaim.created_date)
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
             .all()
         )
-        
-        # The main transaction will be committed by the calling worker, making the status change permanent.
-        logger.info(f"[{cid}] Fetched and locked {len(claims)} claims for processing.")
-        return claims
+
+        if not claims_to_process:
+            logger.debug(f"[{cid}] No claims with status '{status}' found to process at this moment.")
+            return []
+
+        # Now, update the status of the claims we have successfully locked and fetched
+        for claim in claims_to_process:
+            claim.processing_status = 'PROCESSING'
+            claim.updated_date = datetime.utcnow()
+
+        # The session is now "dirty" with the status changes.
+        # The calling worker will be responsible for committing the session,
+        # which makes the status changes and row locks permanent for this transaction.
+        logger.info(f"[{cid}] Fetched and locked {len(claims_to_process)} claims for processing.")
+        return claims_to_process
 
     except SQLAlchemyError as e:
         logger.error(f"[{cid}] Error fetching pending claims: {e}", exc_info=True)
@@ -251,4 +235,3 @@ def create_db_processing_batch(pg_session: Session, batch_name: str, total_claim
         raise StagingDBError(f"Failed to create processing batch: {e}", original_exception=e)
 
 # Other functions (assign_claims_to_db_batch, update_db_batch_processing_status, etc.) remain unchanged.
-
